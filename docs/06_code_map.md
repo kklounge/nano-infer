@@ -30,6 +30,7 @@ nano-infer/
 ├── benchmarks/
 │   ├── bench_throughput.py    离线吞吐/延迟：和 HF generate 对比（静态、混合长度、共享前缀）
 │   ├── bench_serving.py       在线服务：泊松到达的 HTTP 流式请求，TTFT/TPOT/ITL 分位数
+│   ├── bench_sampling.py      采样配置的开销：候选窗口改写前后的交替 A/B（旧实现从 git 取）
 │   ├── profile_step.py        一步 decode 里各阶段（准备输入、前向、lm_head、采样）各花多少时间
 │   └── results/               实测结果 JSON
 ├── examples/                  basic_generate.py（批量生成）、chat.py（终端多轮对话）

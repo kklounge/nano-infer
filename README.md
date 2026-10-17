@@ -282,11 +282,14 @@ python benchmarks/bench_throughput.py --model models/Qwen2.5-0.5B-Instruct --eng
 python benchmarks/bench_serving.py --model models/Qwen2.5-1.5B-Instruct --num-requests 150 --request-rate 2.5 --input-len 3800 --output-len 192 --configs="default;--max-num-batched-tokens 512;--no-chunked-prefill"
 python scripts/verify_model.py --model models/Qwen2.5-1.5B-Instruct --dtype float32
 python benchmarks/profile_step.py --model models/Qwen2.5-0.5B-Instruct
+python benchmarks/bench_sampling.py --model models/Qwen2.5-0.5B-Instruct --batch 64         # 第 5 节的采样 A/B
 ```
 
 大的模型（1.5B / 3B / Qwen3-1.7B）要加 `--scenarios static mixed`：默认还会跑 `prefix` 场景，而那个场景会在外层引擎还活着的时候再建一个引擎，12 GB 显存上权重会被算两遍，KV 缓存就分不到块了。
 
-第 5 节的采样对比**不是**上面这些脚本测出来的——它们都写死了 `temperature=0`。做法是在一个进程里加载一次模型，然后把 `runner.sampler` 在旧实现（`git show 4aaf1f1:nanoinfer/engine/sampler.py`，类的构造参数和现在相同，可以直接换上去）和当前实现之间交替替换：batch 64、prompt 128 token、每个采样配置先跑 15 步预热再计时 60 步取中位数，两个实现每轮各测一遍、共 5 轮，最后取最好的一轮。
+第 5 节的采样对比来自单独的 `benchmarks/bench_sampling.py`——上面那几个脚本都写死了 `temperature=0`，根本不碰采样路径。它在一个进程里加载一次模型，然后把 `runner.sampler` 在改写前的实现和当前实现之间来回替换：batch 64、prompt 128 token，每个采样配置先跑 15 步预热再计时 60 步取中位数，**两个实现每轮各测一遍、交替进行，共 5 轮，取最好的一轮**——这样后台负载在几分钟里的漂移会同等地落在两边。表里三个 batch 分别是 `--batch 1` / `16` / `64`。
+
+旧实现默认由脚本自己从 git 里取（`git show 4aaf1f1:nanoinfer/engine/sampler.py`，构造参数和现在相同，可以直接换上去），不用手工准备；取不到那个 commit（浅克隆、源码压缩包、没装 git）时只测当前实现。注意**改写本身就是一个 commit（`78dfa3e`），所以 `git show HEAD:...` 拿到的是新实现**，那样等于拿新实现和自己比——`grep -c _candidate_window` 是 0 才是旧的（`HEAD` 上是 5）。另外绝对毫秒数会随后台 CPU 负载一起浮动，要看的是改写前后的比例，不是绝对值。
 
 ---
 
