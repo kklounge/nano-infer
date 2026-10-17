@@ -14,6 +14,11 @@ from pathlib import Path
 import pytest
 import torch
 
+# No GPU: run the Triton kernels in Triton's CPU interpreter, so they are still tested.
+# (Must be set before triton is imported.)
+if not torch.cuda.is_available():
+    os.environ.setdefault("TRITON_INTERPRET", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
