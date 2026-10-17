@@ -1,24 +1,40 @@
 """ModelRunner: owns the model weights and the KV cache, and runs one forward pass per step.
 
-It translates a list of Sequences (Python objects) into flat tensors the model understands:
+It translates the scheduler's batch (Python objects) into flat tensors the model understands:
   input_ids / positions  - which tokens to compute and where they sit in their sequence
   slot_mapping           - where to write each new token's K/V in the paged cache
   block_tables           - which pages each sequence owns (to read old K/V back)
+All integer inputs of a step are packed into ONE pinned CPU tensor and copied to the GPU with a
+single asynchronous transfer (each separate small copy costs ~10 us of launch overhead).
+
+Decode-only steps can replay a captured CUDA graph (see the bottom of this file).
 """
 
 import logging
 import math
+import time
 
 import torch
 
 from nanoinfer.config import EngineConfig, ModelConfig
-from nanoinfer.engine.sampler import sample
+from nanoinfer.engine.sampler import Sampler
+from nanoinfer.engine.scheduler import SchedulerOutput
 from nanoinfer.engine.sequence import Sequence
 from nanoinfer.model.attention import AttentionMetadata
 from nanoinfer.model.loader import load_model
+from nanoinfer.model.triton_attention import HAS_TRITON, triton_usable
 from nanoinfer.utils import dtype_size
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_attn_backend(requested: str, device: torch.device) -> str:
+    if requested == "auto":
+        return "triton" if (device.type == "cuda" and HAS_TRITON) else "sdpa"
+    if requested == "triton" and not triton_usable(device):
+        raise ValueError("attn_backend='triton' needs an NVIDIA GPU and the triton package "
+                         "(pip install triton, or triton-windows on Windows)")
+    return requested
 
 
 class ModelRunner:
@@ -28,30 +44,45 @@ class ModelRunner:
         self.device = device
         self.dtype = dtype
         self.block_size = config.block_size
+        self.attn_backend = resolve_attn_backend(config.attn_backend, device)
+        self.pin = device.type == "cuda"
         torch.manual_seed(config.seed)
         self.model = load_model(config.model, device, dtype, max_positions=config.max_model_len, cfg=model_config)
 
         self.num_blocks = self._decide_num_blocks()
         mc = model_config
         # One tensor for the whole cache: [K/V, layer, block, slot-in-block, kv_head, head_dim].
-        # One extra "scratch" block at the end absorbs writes from padding rows (CUDA graphs).
+        # One extra "scratch" block at the end absorbs writes from padding rows (CUDA graphs) and warm-up.
         self.kv_cache = torch.zeros(2, mc.num_hidden_layers, self.num_blocks + 1, self.block_size,
                                     mc.num_key_value_heads, mc.head_dim, device=device, dtype=dtype)
         self.kv_caches = [(self.kv_cache[0, i], self.kv_cache[1, i]) for i in range(mc.num_hidden_layers)]
+        self.scratch_block = self.num_blocks
         self.scratch_slot = self.num_blocks * self.block_size
-        self.generator = torch.Generator(device=device)
-        self.generator.manual_seed(config.seed)
+        self.max_blocks_per_seq = math.ceil(config.max_model_len / self.block_size)
+        self.sampler = Sampler(device, mc.vocab_size, mc.eos_token_ids, config.seed)
 
-        self.graphs: dict[int, "torch.cuda.CUDAGraph"] = {}
-        if config.use_cuda_graph:
+        self.graphs: dict[tuple[int, int], "torch.cuda.CUDAGraph"] = {}
+        self.graph_batch_sizes: list[int] = []
+        self.graph_ctx_buckets: list[int] = []
+        self.graph_capture_seconds = 0.0
+        use_graph = config.use_cuda_graph
+        if use_graph is None:
+            use_graph = device.type == "cuda"
+        if config.enforce_eager:
+            use_graph = False
+        if self.attn_backend == "triton":
+            self._warmup()
+        if use_graph:
             if device.type != "cuda":
                 logger.warning("use_cuda_graph=True ignored: CUDA graphs need an NVIDIA GPU")
             else:
+                t0 = time.perf_counter()
                 try:
                     self._capture_cuda_graphs()
                 except Exception as e:   # never let an optional optimisation break generation
                     logger.warning("CUDA graph capture failed (%s); falling back to eager mode", e)
                     self.graphs = {}
+                self.graph_capture_seconds = time.perf_counter() - t0
 
     # ------------------------------------------------------------------ KV cache sizing
     def block_bytes(self) -> int:
@@ -87,14 +118,16 @@ class ModelRunner:
             cu.append(cu[-1] + length)
         ids = torch.zeros(cu[-1], dtype=torch.long, device=self.device)
         pos = torch.cat([torch.arange(length, device=self.device) for length in lens])
-        meta = AttentionMetadata(is_prefill=True, slot_mapping=pos, block_size=self.block_size,
-                                 cu_seqlens_q=cu, cu_seqlens_k=cu, backend=cfg.attn_backend)
+        meta = AttentionMetadata(slot_mapping=pos, block_size=self.block_size, backend=self.attn_backend,
+                                 cu_seqlens_q=cu, seqlens_k=lens, max_q_len=seq_len)
         hidden = self.model(ids, pos, None, meta)
-        self.model.compute_logits(hidden[-cfg.max_num_seqs:])
+        logits = self.model.compute_logits(hidden[-cfg.max_num_seqs:])
+        # the sampler needs a few [batch, vocab] float32 temporaries (sort, softmax, noise...)
+        tmp = [torch.empty_like(logits) for _ in range(4)]
         torch.cuda.synchronize()
         # extra memory the forward pass needed on top of the weights
         activation_peak = torch.cuda.max_memory_allocated() - torch.cuda.memory_allocated()
-        del hidden
+        del hidden, logits, tmp
         torch.cuda.empty_cache()
         free, total = torch.cuda.mem_get_info()
         used = total - free          # weights + CUDA context + anything else running on the GPU
@@ -102,140 +135,216 @@ class ModelRunner:
         return max(int(budget) // self.block_bytes(), 0)
 
     # ------------------------------------------------------------------ batch preparation
-    def _slot(self, seq: Sequence, pos: int) -> int:
-        return seq.block_table[pos // self.block_size] * self.block_size + pos % self.block_size
+    def _to_device(self, *arrays: list[int]) -> list[torch.Tensor]:
+        """Copy several int lists to the device with ONE pinned, non-blocking transfer."""
+        flat = [x for a in arrays for x in a]
+        cpu = torch.tensor(flat, dtype=torch.long)
+        if self.device.type == "cpu":
+            dev = cpu
+        else:
+            dev = cpu.pin_memory().to(self.device, non_blocking=True)
+        out, i = [], 0
+        for a in arrays:
+            out.append(dev[i:i + len(a)])
+            i += len(a)
+        return out
 
-    def _tensor(self, values) -> torch.Tensor:
-        return torch.tensor(values, dtype=torch.long, device=self.device)
+    def _table_width(self, seqs: list[Sequence]) -> int:
+        w = max(len(s.block_table) for s in seqs)
+        return min(-(-w // 16) * 16, max(self.max_blocks_per_seq, w))   # pad -> fewer kernel variants
 
-    def _block_table_tensor(self, seqs: list[Sequence]) -> torch.Tensor:
-        """[B, max_blocks] page ids; short rows are padded with 0 (never read: masked or out of range)."""
-        width = max(len(s.block_table) for s in seqs)
-        return self._tensor([s.block_table + [0] * (width - len(s.block_table)) for s in seqs])
-
-    def prepare_prefill(self, seqs: list[Sequence]):
-        input_ids, positions, slot_mapping = [], [], []
-        cu_q, cu_k = [0], [0]
-        for seq in seqs:
-            start, end = seq.num_cached_tokens, seq.num_tokens   # skip tokens already in the prefix cache
-            input_ids.extend(seq.token_ids[start:end])
+    def prepare(self, out: SchedulerOutput):
+        """Returns input_ids, positions, metadata, logits_indices (rows whose next token is sampled)."""
+        seqs, nd = out.seqs, out.num_decode
+        bs = self.block_size
+        input_ids, positions, seq_index, ctx_lens, logits_idx = [], [], [], [], []
+        cu_q = [0]
+        for i, s in enumerate(seqs):
+            start, n = s.num_computed_tokens, s.num_scheduled_tokens
+            end = start + n
+            input_ids.extend(s.token_ids[start:end])
             positions.extend(range(start, end))
-            slot_mapping.extend(self._slot(seq, p) for p in range(start, end))
-            cu_q.append(cu_q[-1] + end - start)
-            cu_k.append(cu_k[-1] + end)
-        has_prefix = any(s.num_cached_tokens > 0 for s in seqs)
-        t = self._tensor
-        meta = AttentionMetadata(
-            is_prefill=True, slot_mapping=t(slot_mapping), block_size=self.block_size,
-            block_tables=self._block_table_tensor(seqs) if has_prefix else None,
-            cu_seqlens_q=cu_q, cu_seqlens_k=cu_k, backend=self.config.attn_backend)
-        last_token_index = t([c - 1 for c in cu_q[1:]])   # we only need logits of each prompt's last token
-        return t(input_ids), t(positions), meta, last_token_index
-
-    def prepare_decode(self, seqs: list[Sequence]):
-        t = self._tensor
-        lens = [s.num_tokens for s in seqs]
-        input_ids = t([s.last_token for s in seqs])
-        positions = t([n - 1 for n in lens])
-        slot_mapping = t([self._slot(s, n - 1) for s, n in zip(seqs, lens)])
-        max_len = max(lens)
-        meta = AttentionMetadata(
-            is_prefill=False, slot_mapping=slot_mapping, block_size=self.block_size,
-            context_lens=t(lens), block_tables=self._block_table_tensor(seqs),
-            max_context_len=max_len, all_same_len=all(n == max_len for n in lens),
-            backend=self.config.attn_backend)
-        return input_ids, positions, meta
+            seq_index.extend([i] * n)
+            ctx_lens.append(end)
+            if i >= nd:
+                cu_q.append(cu_q[-1] + n)
+            if end == s.num_tokens:
+                logits_idx.append(len(input_ids) - 1)
+        width = self._table_width(seqs)
+        tables = []
+        for s in seqs:
+            tables.extend(s.block_table)
+            tables.extend([0] * (width - len(s.block_table)))
+        (ids_t, pos_t, sidx_t, ctx_t, cu_t, lidx_t, bt_t) = self._to_device(
+            input_ids, positions, seq_index, ctx_lens, cu_q, logits_idx, tables)
+        bt_t = bt_t.view(len(seqs), width)
+        slot_mapping = bt_t[sidx_t, pos_t // bs] * bs + pos_t % bs
+        nprefill = len(seqs) - nd
+        meta = AttentionMetadata(slot_mapping=slot_mapping, block_size=bs, backend=self.attn_backend,
+                                 num_decode=nd)
+        if nd:
+            dec_lens = ctx_lens[:nd]
+            meta.decode_context_lens = ctx_t[:nd]
+            meta.decode_block_tables = bt_t[:nd]
+            meta.decode_max_len = max(dec_lens)
+            meta.decode_all_same_len = min(dec_lens) == meta.decode_max_len
+        if nprefill:
+            meta.cu_seqlens_q = cu_q
+            meta.seqlens_k = ctx_lens[nd:]
+            meta.cu_seqlens_q_t = cu_t
+            meta.seqlens_k_t = ctx_t[nd:]
+            meta.prefill_block_tables = bt_t[nd:]
+            meta.max_q_len = max(s.num_scheduled_tokens for s in seqs[nd:])
+        return ids_t, pos_t, meta, lidx_t
 
     # ------------------------------------------------------------------ forward + sampling
     @torch.inference_mode()
-    def compute_logits(self, seqs: list[Sequence], is_prefill: bool) -> torch.Tensor:
-        """One forward pass; returns next-token logits [len(seqs), vocab] (float32)."""
-        if is_prefill:
-            input_ids, positions, meta, last_idx = self.prepare_prefill(seqs)
-            hidden = self.model(input_ids, positions, self.kv_caches, meta)[last_idx]
-        elif self.graphs and len(seqs) <= max(self.graphs):
-            hidden = self._replay_graph(seqs)
-        else:
-            input_ids, positions, meta = self.prepare_decode(seqs)
-            hidden = self.model(input_ids, positions, self.kv_caches, meta)
-        return self.model.compute_logits(hidden)
+    def compute_logits(self, out: SchedulerOutput) -> torch.Tensor:
+        """One forward pass; returns next-token logits [num sampling seqs, vocab] (float32)."""
+        if out.num_prefill == 0 and self._graph_key(out.seqs) is not None:
+            hidden = self._replay_graph(out.seqs)
+            rows = [i for i, s in enumerate(out.seqs) if s.num_computed_tokens + 1 == s.num_tokens]
+            if len(rows) != len(out.seqs):        # some rows were 1-token prompt chunks: nothing to sample
+                hidden = hidden[torch.tensor(rows, dtype=torch.long, device=self.device)]
+            return self.model.compute_logits(hidden)
+        input_ids, positions, meta, logits_idx = self.prepare(out)
+        hidden = self.model(input_ids, positions, self.kv_caches, meta)
+        return self.model.compute_logits(hidden[logits_idx])
 
     @torch.inference_mode()
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        logits = self.compute_logits(seqs, is_prefill)
-        sps = [s.sampling_params for s in seqs]
-        temps = torch.tensor([sp.temperature for sp in sps], dtype=torch.float32, device=self.device)
-        top_ps = torch.tensor([sp.top_p for sp in sps], dtype=torch.float32, device=self.device)
-        top_ks = torch.tensor([sp.top_k for sp in sps], dtype=torch.long, device=self.device)
-        return sample(logits, temps, top_ps, top_ks, self.generator).tolist()
+    def run(self, out: SchedulerOutput, sampling: list[Sequence] | None = None):
+        """Forward + sample. Returns (token ids, logprobs) for out.sampling_seqs, in order."""
+        logits = self.compute_logits(out)
+        sampling = out.sampling_seqs if sampling is None else sampling
+        if not sampling:
+            return [], None
+        return self.sampler(logits, sampling)
 
-    # ------------------------------------------------------------------ CUDA graphs (experimental)
+    @torch.inference_mode()
+    def _warmup(self):
+        """Compile the Triton kernels now (a few seconds the first time, cached on disk afterwards)
+        instead of during the first request. Writes only into the scratch block."""
+        n = self.block_size
+        seq_tables = torch.full((1, 16), self.scratch_block, dtype=torch.long, device=self.device)
+        slots = torch.arange(n, device=self.device) + self.scratch_slot
+        for q_len in (n, 1):
+            meta = AttentionMetadata(slot_mapping=slots[:q_len], block_size=self.block_size, backend=self.attn_backend)
+            if q_len == 1:
+                meta.num_decode = 1
+                meta.decode_context_lens = torch.tensor([n], device=self.device)
+                meta.decode_block_tables = seq_tables
+                meta.decode_max_len = n
+            else:
+                meta.cu_seqlens_q, meta.seqlens_k, meta.max_q_len = [0, n], [n], n
+                meta.cu_seqlens_q_t = torch.tensor([0, n], device=self.device)
+                meta.seqlens_k_t = torch.tensor([n], device=self.device)
+                meta.prefill_block_tables = seq_tables
+            self.model(torch.zeros(q_len, dtype=torch.long, device=self.device),
+                       torch.arange(n - q_len, n, device=self.device), self.kv_caches, meta)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+
+    # ------------------------------------------------------------------ CUDA graphs
     # A CUDA graph records the hundreds of small GPU kernel launches of one decode step once and
-    # replays them with a single launch. Shapes must be static, so we capture a few batch sizes,
-    # pad the batch up to the next captured size, and always gather max_model_len keys (masked).
+    # replays them with a single launch. Shapes must be static, so we capture a few batch sizes and
+    # pad the batch up to the next captured size (padding rows write into the scratch block).
+    #   triton backend: the kernels loop up to each sequence's real context length at runtime,
+    #                   so one graph per batch size covers every context length;
+    #   sdpa backend  : attention gathers a fixed number of keys, so graphs are also captured for a few
+    #                   context-length buckets (256, 512, ... max_model_len) and the smallest bucket
+    #                   that fits is replayed (instead of always gathering max_model_len keys).
     # The "static decode" helpers below are plain PyTorch and are unit-tested on CPU; only the
     # capture/replay calls themselves need a GPU.
+    def _ctx_buckets(self) -> list[int]:
+        max_len = self.max_blocks_per_seq * self.block_size
+        if self.attn_backend == "triton":
+            return [max_len]
+        buckets, b = [], 256
+        while b < max_len:
+            buckets.append(b)
+            b *= 2
+        return buckets + [max_len]
+
     def alloc_static_buffers(self, max_bs: int):
-        max_blocks = math.ceil(self.config.max_model_len / self.block_size)
         dev, L = self.device, torch.long
         self._g = dict(
-            input_ids=torch.zeros(max_bs, dtype=L, device=dev),
-            positions=torch.zeros(max_bs, dtype=L, device=dev),
-            slot_mapping=torch.full((max_bs,), self.scratch_slot, dtype=L, device=dev),
-            context_lens=torch.ones(max_bs, dtype=L, device=dev),
-            block_tables=torch.zeros(max_bs, max_blocks, dtype=L, device=dev),
+            vec=torch.zeros(4, max_bs, dtype=L, device=dev),      # rows: input_ids, positions, slots, ctx lens
+            block_tables=torch.zeros(max_bs, self.max_blocks_per_seq, dtype=L, device=dev),
             hidden=torch.zeros(max_bs, self.model_config.hidden_size, dtype=self.dtype, device=dev),
         )
+        self._g["vec"][2].fill_(self.scratch_slot)
+        self._g["vec"][3].fill_(1)
 
-    def static_decode_args(self, b: int):
+    def static_decode_args(self, b: int, ctx_bucket: int | None = None):
         """Model inputs that are views into the static buffers, for a padded batch of size b."""
         g = self._g
-        max_len = g["block_tables"].shape[1] * self.block_size
+        ctx_bucket = ctx_bucket or self.max_blocks_per_seq * self.block_size
+        vec = g["vec"]
         meta = AttentionMetadata(
-            is_prefill=False, slot_mapping=g["slot_mapping"][:b], block_size=self.block_size,
-            context_lens=g["context_lens"][:b], block_tables=g["block_tables"][:b],
-            max_context_len=max_len, all_same_len=False, backend=self.config.attn_backend)
-        return g["input_ids"][:b], g["positions"][:b], self.kv_caches, meta
+            slot_mapping=vec[2, :b], block_size=self.block_size, backend=self.attn_backend, num_decode=b,
+            decode_context_lens=vec[3, :b], decode_block_tables=g["block_tables"][:b, :-(-ctx_bucket // self.block_size)],
+            decode_max_len=ctx_bucket, decode_all_same_len=False)
+        return vec[0, :b], vec[1, :b], self.kv_caches, meta
 
     def fill_static_inputs(self, seqs: list[Sequence], b: int):
         """Copy a real decode batch into the static buffers; rows n..b-1 become harmless padding
-        (they write into the scratch block and attend to a single dummy key)."""
-        n, g = len(seqs), self._g
-        input_ids, positions, meta = self.prepare_decode(seqs)
-        g["input_ids"][:b].zero_()
-        g["positions"][:b].zero_()
-        g["slot_mapping"][:b].fill_(self.scratch_slot)
-        g["context_lens"][:b].fill_(1)
-        g["block_tables"][:b].zero_()
-        g["input_ids"][:n] = input_ids
-        g["positions"][:n] = positions
-        g["slot_mapping"][:n] = meta.slot_mapping
-        g["context_lens"][:n] = meta.context_lens
-        g["block_tables"][:n, :meta.block_tables.shape[1]] = meta.block_tables
+        (they write into the scratch block and attend to a single key)."""
+        n, bs = len(seqs), self.block_size
+        ids, pos, slots, ctx = [], [], [], []
+        for s in seqs:
+            p = s.num_computed_tokens
+            ids.append(s.token_ids[p])
+            pos.append(p)
+            slots.append(s.block_table[p // bs] * bs + p % bs)
+            ctx.append(p + 1)
+        pad = b - n
+        ids += [0] * pad
+        pos += [0] * pad
+        slots += [self.scratch_slot] * pad
+        ctx += [1] * pad
+        width = max(len(s.block_table) for s in seqs)
+        tables = [x for s in seqs for x in s.block_table + [0] * (width - len(s.block_table))]
+        vec_t, bt_t = self._to_device(ids + pos + slots + ctx, tables)
+        self._g["vec"][:, :b].copy_(vec_t.view(4, b))
+        self._g["block_tables"][:n, :width].copy_(bt_t.view(n, width))
+        # Columns >= width of rows < n keep stale (valid) page ids: they lie beyond the context and
+        # are never read (triton) or masked out (sdpa).
+
+    def _graph_key(self, seqs: list[Sequence]) -> tuple[int, int] | None:
+        if not self.graphs or len(seqs) > self.graph_batch_sizes[-1]:
+            return None
+        n = len(seqs)
+        b = next(size for size in self.graph_batch_sizes if size >= n)
+        need = max(s.num_computed_tokens for s in seqs) + 1
+        bucket = next(c for c in self.graph_ctx_buckets if c >= need)
+        return b, bucket
 
     def _capture_cuda_graphs(self):
-        max_bs = min(self.config.max_num_seqs, 256)
-        sizes = sorted({b for b in [1, 2, 4, 8, *range(16, max_bs + 1, 16)] if b <= max_bs} | {max_bs})
+        max_bs = min(self.config.max_num_seqs, self.config.max_cuda_graph_batch)
+        sizes = sorted({b for b in [1, 2, 4, 8, *range(16, 33, 8), *range(48, max_bs + 1, 16)] if b <= max_bs} | {max_bs})
+        buckets = self._ctx_buckets()
         self.alloc_static_buffers(max_bs)
         hidden = self._g["hidden"]
         pool = None
         with torch.inference_mode():
-            for b in reversed(sizes):        # largest first so smaller graphs can share its memory pool
-                args = self.static_decode_args(b)
-                hidden[:b] = self.model(*args)          # warm-up (also builds RoPE tables)
-                torch.cuda.synchronize()
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph, pool=pool):
-                    hidden[:b] = self.model(*args)
-                if pool is None:
-                    pool = graph.pool()
-                torch.cuda.synchronize()
-                self.graphs[b] = graph
-        logger.info("captured CUDA graphs for decode batch sizes %s", sizes)
+            for c in reversed(buckets):
+                for b in reversed(sizes):        # largest first so smaller graphs can share its memory pool
+                    args = self.static_decode_args(b, c)
+                    hidden[:b] = self.model(*args)          # warm-up (also builds RoPE tables, compiles kernels)
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, pool=pool):
+                        hidden[:b] = self.model(*args)
+                    if pool is None:
+                        pool = graph.pool()
+                    torch.cuda.synchronize()
+                    self.graphs[(b, c)] = graph
+        self.graph_batch_sizes = sizes
+        self.graph_ctx_buckets = buckets
+        logger.info("captured %d CUDA graphs (batch sizes %s, context buckets %s)", len(self.graphs), sizes, buckets)
 
     def _replay_graph(self, seqs: list[Sequence]) -> torch.Tensor:
-        n = len(seqs)
-        b = min(size for size in self.graphs if size >= n)
+        b, c = self._graph_key(seqs)
         self.fill_static_inputs(seqs, b)
-        self.graphs[b].replay()
-        return self._g["hidden"][:n].clone()
+        self.graphs[(b, c)].replay()
+        return self._g["hidden"][:len(seqs)]

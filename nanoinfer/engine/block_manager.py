@@ -3,9 +3,11 @@
 The KV cache is cut into `num_blocks` fixed-size blocks (pages) of `block_size` tokens.
 The block manager decides which physical block each sequence uses:
 
-* allocate(seq)   - give a new sequence enough blocks for its prompt
-* may_append(seq) - give a growing sequence a new block when its last block is full
-* deallocate(seq) - return a finished/preempted sequence's blocks
+* get_cached_prefix(seq) - find blocks of the prompt that are already in the cache (no side effects)
+* allocate_prefix(seq)   - take those blocks for a newly admitted sequence
+* allocate_slots(seq, n) - make sure the sequence has blocks for its next n tokens
+                           (a prompt chunk during prefill, or 1 token during decode)
+* deallocate(seq)        - return a finished/preempted sequence's blocks
 
 Prefix caching (前缀缓存):
   Every FULL block gets a hash computed from (hash of the previous block, token ids in this block).
@@ -14,6 +16,12 @@ Prefix caching (前缀缓存):
   recomputing it. Blocks are shared with a reference count (ref_count); a block is only
   truly free when nobody uses it. Freed blocks keep their content and hash, so they can
   still be "revived" by a later request until they are overwritten (LRU eviction).
+
+When is a block's hash published? Only when its K/V will really be in the cache by the end of the
+current step: at allocate_slots() time for blocks that this step's tokens fill completely. (With
+chunked prefill, the blocks of later chunks are not computed yet, so they must not be findable.)
+Sharing inside one step is safe because every layer writes the K/V of ALL tokens in the batch
+before it computes any attention.
 """
 
 import hashlib
@@ -49,6 +57,7 @@ class Block:
 
 class BlockManager:
     def __init__(self, num_blocks: int, block_size: int, enable_prefix_caching: bool = True):
+        self.num_blocks = num_blocks
         self.block_size = block_size
         self.enable_prefix_caching = enable_prefix_caching
         self.blocks = [Block(i) for i in range(num_blocks)]
@@ -58,13 +67,17 @@ class BlockManager:
         self.used_block_ids: set[int] = set()
         self.hash_to_block_id: dict[int, int] = {}
         # statistics
-        self.num_cache_queries = 0     # full prompt blocks looked up
+        self.num_cache_queries = 0     # full prompt blocks looked up at admission
         self.num_cache_hits = 0        # ... of which were reused
 
     # ------------------------------------------------------------------ helpers
     @property
     def num_free_blocks(self) -> int:
         return len(self.free_block_ids)
+
+    @property
+    def usage(self) -> float:
+        return len(self.used_block_ids) / max(self.num_blocks, 1)
 
     def _take_free_block(self, block_id: int | None = None) -> Block:
         """Take a specific free block (revive) or the least-recently-freed one (evict)."""
@@ -95,70 +108,75 @@ class BlockManager:
         block.token_ids = list(token_ids)
         self.hash_to_block_id[block_hash] = block.block_id
 
-    # ------------------------------------------------------------------ prefill
-    def can_allocate(self, seq: Sequence) -> bool:
-        # conservative: pretend nothing is cached
-        return self.num_free_blocks >= seq.num_blocks
+    def blocks_needed(self, seq: Sequence, num_new_tokens: int) -> int:
+        """Extra blocks the sequence needs so that its next num_new_tokens fit."""
+        total = seq.num_computed_tokens + num_new_tokens
+        return max(0, -(-total // self.block_size) - len(seq.block_table))
 
-    def allocate(self, seq: Sequence):
-        """Assign blocks to every token of `seq` (used before its prefill)."""
-        assert not seq.block_table
-        seq.num_cached_tokens = 0
+    # ------------------------------------------------------------------ admission (prefix cache lookup)
+    def get_cached_prefix(self, seq: Sequence) -> tuple[list[int], list[int]]:
+        """Longest run of leading full blocks already in the cache. Returns (block ids, hashes).
+        The last prompt token is never served from the cache: its logits are needed for sampling."""
+        if not self.enable_prefix_caching:
+            return [], []
+        ids, hashes = [], []
         prefix_hash = None
-        cache_miss = False
-        n = seq.num_blocks
-        for i in range(n):
+        for i in range((seq.num_tokens - 1) // self.block_size):
             token_ids = seq.block(i)
-            is_full = len(token_ids) == self.block_size
-            block_hash = compute_block_hash(token_ids, prefix_hash) if (is_full and self.enable_prefix_caching) else None
-            if block_hash is not None:
-                self.num_cache_queries += 1
-            # The last token must always be computed (we need its logits to sample the next token),
-            # so a hit on the final block of a fully-cached prompt is treated as a miss.
-            is_last_full_block = (i == n - 1) and is_full
-            block_id = self.hash_to_block_id.get(block_hash) if block_hash is not None else None
-            if (block_id is None or cache_miss or is_last_full_block
-                    or self.blocks[block_id].token_ids != token_ids):
-                cache_miss = True
-                block = self._take_free_block()
+            h = compute_block_hash(token_ids, prefix_hash)
+            block_id = self.hash_to_block_id.get(h)
+            if block_id is None or self.blocks[block_id].token_ids != token_ids:
+                break
+            ids.append(block_id)
+            hashes.append(h)
+            prefix_hash = h
+        return ids, hashes
+
+    def num_free_after_revive(self, block_ids: list[int]) -> int:
+        """Free blocks left once the given cached blocks are taken (free-but-cached ones count)."""
+        return self.num_free_blocks - sum(1 for b in block_ids if b not in self.used_block_ids)
+
+    def allocate_prefix(self, seq: Sequence, block_ids: list[int]):
+        """Admit `seq`: share the cached blocks found by get_cached_prefix()."""
+        assert not seq.block_table
+        if self.enable_prefix_caching:
+            self.num_cache_queries += (seq.num_tokens - 1) // self.block_size
+            self.num_cache_hits += len(block_ids)
+        for block_id in block_ids:
+            if block_id in self.used_block_ids:
+                self.blocks[block_id].ref_count += 1
             else:
-                # prefix cache hit: share the existing block, skip computing these tokens
-                self.num_cache_hits += 1
-                seq.num_cached_tokens += self.block_size
-                if block_id in self.used_block_ids:
-                    block = self.blocks[block_id]
-                    block.ref_count += 1
-                else:
-                    block = self._take_free_block(block_id)
-            if block_hash is not None:
-                self._register(block, block_hash, token_ids)
-            seq.block_table.append(block.block_id)
-            prefix_hash = block_hash
+                self._take_free_block(block_id)
+            seq.block_table.append(block_id)
+        seq.num_cached_tokens = len(block_ids) * self.block_size
+        seq.num_computed_tokens = seq.num_cached_tokens
+
+    # ------------------------------------------------------------------ every step
+    def can_allocate_slots(self, seq: Sequence, num_new_tokens: int, reserve: int = 0) -> bool:
+        return self.num_free_blocks - reserve >= self.blocks_needed(seq, num_new_tokens)
+
+    def allocate_slots(self, seq: Sequence, num_new_tokens: int):
+        """Give `seq` blocks for tokens [num_computed, num_computed + n) and publish the hashes of the
+        blocks those tokens complete."""
+        for _ in range(self.blocks_needed(seq, num_new_tokens)):
+            seq.block_table.append(self._take_free_block().block_id)
+        if not self.enable_prefix_caching:
+            return
+        bs = self.block_size
+        first, end = seq.num_computed_tokens // bs, (seq.num_computed_tokens + num_new_tokens) // bs
+        for idx in range(first, end):               # blocks that become full in this step
+            block = self.blocks[seq.block_table[idx]]
+            if block.hash is not None:
+                continue
+            prev_hash = self.blocks[seq.block_table[idx - 1]].hash if idx > 0 else None
+            if idx > 0 and prev_hash is None:
+                return                              # chain broken (should not happen); stop publishing
+            token_ids = seq.block(idx)
+            self._register(block, compute_block_hash(token_ids, prev_hash), token_ids)
 
     def deallocate(self, seq: Sequence):
         # free in reverse so tail blocks are evicted before shared prefix blocks
         for block_id in reversed(seq.block_table):
             self._release(block_id)
         seq.block_table = []
-        seq.num_cached_tokens = 0
-
-    # ------------------------------------------------------------------ decode
-    def can_append(self, seq: Sequence) -> bool:
-        """The token fed in this decode step sits at position len(seq)-1.
-        It needs a fresh block exactly when that position starts a new block."""
-        needs_new_block = (seq.num_tokens - 1) % self.block_size == 0
-        return self.num_free_blocks >= int(needs_new_block)
-
-    def may_append(self, seq: Sequence):
-        pos = seq.num_tokens - 1
-        if pos % self.block_size == 0 and len(seq.block_table) * self.block_size <= pos:
-            seq.block_table.append(self._take_free_block().block_id)
-        if self.enable_prefix_caching and (pos + 1) % self.block_size == 0:
-            # this step fills the last block -> register its hash so future requests can reuse it
-            idx = pos // self.block_size
-            block = self.blocks[seq.block_table[idx]]
-            if block.hash is None:
-                prev_hash = self.blocks[seq.block_table[idx - 1]].hash if idx > 0 else None
-                if idx == 0 or prev_hash is not None:
-                    token_ids = seq.block(idx)
-                    self._register(block, compute_block_hash(token_ids, prev_hash), token_ids)
+        seq.num_computed_tokens = 0

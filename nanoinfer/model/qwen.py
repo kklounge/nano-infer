@@ -73,7 +73,7 @@ class QwenModel(nn.Module):
     def forward(self, input_ids, positions, kv_caches, meta):
         h = self.embed_tokens(input_ids)
         rope = self.rotary(positions, h.dtype)       # computed once, shared by every layer
-        meta.prepare()                               # cache-read slots, also shared by every layer
+        meta.prepare(kv_caches is not None)          # cache-read slots, also shared by every layer
         for i, layer in enumerate(self.layers):
             h = layer(rope, h, kv_caches[i] if kv_caches is not None else None, meta)
         return self.norm(h)

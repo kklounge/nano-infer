@@ -47,17 +47,53 @@ def test_logits_match_hf_prefill_and_decode(tiny, backend, block_size):
     for s in seqs:
         llm.scheduler.add(s)
 
-    batch, is_prefill = llm.scheduler.schedule()
-    assert is_prefill and len(batch) == len(prompts)         # all prompts prefilled in ONE packed batch
+    out = llm.scheduler.schedule()
+    assert len(out.seqs) == len(prompts)            # all prompts prefilled in ONE packed batch
     for step in range(6):
-        logits = llm.runner.compute_logits(batch, is_prefill)
+        logits = llm.runner.compute_logits(out)
         with torch.no_grad():
-            for i, s in enumerate(batch):
+            for i, s in enumerate(out.sampling_seqs):
                 ref = hf(torch.tensor([s.token_ids])).logits[0, -1]
                 torch.testing.assert_close(logits[i], ref, atol=ATOL, rtol=1e-4)
-        llm.scheduler.postprocess(batch, logits.argmax(-1).tolist())
-        batch, is_prefill = llm.scheduler.schedule()
-        assert not is_prefill
+        llm.scheduler.postprocess(out, logits.argmax(-1).tolist())
+        out = llm.scheduler.schedule()
+        assert out.num_prefill == 0
+
+
+@pytest.mark.parametrize("backend", ["sdpa", "naive"])
+def test_logits_match_hf_in_mixed_and_chunked_steps(tiny, backend):
+    """Decode tokens and prompt chunks in the same forward pass, chunks that continue a cached prefix:
+    every logit row must still equal HF's."""
+    path, hf = tiny
+    llm = LLM(str(path), dtype="float32", device="cpu", max_model_len=256, block_size=4,
+              attn_backend=backend, max_num_batched_tokens=24)
+    prompts = random_prompts(seed=21, lengths=(6, 50, 9, 31))
+    for p in prompts:
+        llm.scheduler.add(Sequence(p, SamplingParams(temperature=0, max_tokens=12), 4))
+    mixed = chunked = 0
+    while llm.has_unfinished_requests():
+        out = llm.scheduler.schedule()
+        mixed += out.num_decode > 0 and out.num_prefill > 0
+        chunked += any(s.num_computed_tokens + s.num_scheduled_tokens < s.num_tokens for s in out.seqs)
+        logits = llm.runner.compute_logits(out)
+        with torch.no_grad():
+            for i, s in enumerate(out.sampling_seqs):
+                ref = hf(torch.tensor([s.token_ids])).logits[0, -1]
+                torch.testing.assert_close(logits[i], ref, atol=ATOL, rtol=1e-4)
+        llm.scheduler.postprocess(out, logits.argmax(-1).tolist())
+    assert mixed > 0 and chunked > 0
+
+
+@pytest.mark.parametrize("budget", [7, 16, 33])
+def test_greedy_tokens_match_hf_with_chunked_prefill(tiny, budget):
+    path, hf = tiny
+    prompts = random_prompts(seed=4, lengths=(3, 45, 29, 70, 1, 12))
+    ref = [hf_greedy(hf, p, 20) for p in prompts]
+    llm = LLM(str(path), dtype="float32", device="cpu", max_model_len=256, block_size=4,
+              max_num_batched_tokens=budget, max_num_seqs=4)
+    outs = llm.generate(prompts, SamplingParams(temperature=0, max_tokens=20, ignore_eos=True))
+    assert llm.stats.mixed_steps > 0
+    assert [o.token_ids for o in outs] == ref
 
 
 @pytest.mark.parametrize("backend", ["sdpa", "naive"])
@@ -102,17 +138,18 @@ def test_static_padded_decode_matches_eager(tiny):
     seqs = [Sequence(p, SamplingParams(temperature=0), 4) for p in prompts]
     for s in seqs:
         llm.scheduler.add(s)
-    batch, _ = llm.scheduler.schedule()
-    llm.scheduler.postprocess(batch, runner.run(batch, True))
-    batch, is_prefill = llm.scheduler.schedule()
-    assert not is_prefill
+    out = llm.scheduler.schedule()
+    llm.scheduler.postprocess(out, runner.run(out)[0])
+    out = llm.scheduler.schedule()
+    assert out.num_prefill == 0
     snapshot = runner.kv_cache.clone()
-    eager = runner.compute_logits(batch, False)
+    eager = runner.compute_logits(out)
 
-    runner.kv_cache.copy_(snapshot)
     runner.alloc_static_buffers(max_bs=8)
-    runner.fill_static_inputs(batch, b=8)                    # 3 real rows + 5 padding rows
-    with torch.inference_mode():
-        hidden = runner.model(*runner.static_decode_args(8))
-        static = runner.model.compute_logits(hidden[:3])
-    torch.testing.assert_close(static, eager, atol=ATOL, rtol=1e-4)
+    for bucket in (16, 32, 128):                             # context-length buckets (sdpa graphs)
+        runner.kv_cache.copy_(snapshot)
+        runner.fill_static_inputs(out.seqs, b=8)             # 3 real rows + 5 padding rows
+        with torch.inference_mode():
+            hidden = runner.model(*runner.static_decode_args(8, bucket))
+            static = runner.model.compute_logits(hidden[:3])
+        torch.testing.assert_close(static, eager, atol=ATOL, rtol=1e-4)

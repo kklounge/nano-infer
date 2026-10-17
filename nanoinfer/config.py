@@ -82,21 +82,32 @@ class EngineConfig:
     dtype: str = "auto"                     # "auto" | "bfloat16" | "float16" | "float32"
     block_size: int = 16                    # tokens per KV-cache block (page)
     max_num_seqs: int = 64                  # max sequences in one batch
-    max_num_batched_tokens: int = 4096      # max tokens in one forward pass (prefill budget)
+    max_num_batched_tokens: int | None = None   # token budget of one forward pass (default: 2048 with
+                                            # chunked prefill, else max_model_len)
     max_model_len: int = 4096               # max prompt + output length per sequence
+    enable_chunked_prefill: bool = True     # split long prompts across steps and mix them with decodes
     num_kvcache_blocks: int | None = None   # set explicitly, or let the engine size it
     cpu_kvcache_gb: float = 0.5             # KV cache budget on CPU
     gpu_memory_utilization: float = 0.85    # fraction of GPU memory the engine may use
+    kv_watermark: float = 0.01              # fraction of blocks kept free when admitting new requests
     enable_prefix_caching: bool = True
-    attn_backend: str = "sdpa"              # "sdpa" (torch fused kernel) | "naive" (plain matmul+softmax, for learning)
-    use_cuda_graph: bool = False            # experimental, CUDA only
+    # "auto" -> "triton" on CUDA when Triton is installed, else "sdpa".
+    # "triton": our paged-attention kernels (read K/V straight from the pages, no copies)
+    # "sdpa"  : gather pages into a contiguous tensor + torch's fused attention (works everywhere)
+    # "naive" : plain matmul + softmax, the textbook formula (for learning)
+    attn_backend: str = "auto"
+    use_cuda_graph: bool | None = None      # None -> on for CUDA (decode steps replay captured graphs)
+    enforce_eager: bool = False             # True -> never use CUDA graphs
+    max_cuda_graph_batch: int = 128         # largest decode batch that is captured
     seed: int = 0
 
     def __post_init__(self):
-        if self.attn_backend not in ("sdpa", "naive"):
-            raise ValueError("attn_backend must be 'sdpa' or 'naive'")
+        if self.attn_backend not in ("auto", "triton", "sdpa", "naive"):
+            raise ValueError("attn_backend must be 'auto', 'triton', 'sdpa' or 'naive'")
         if self.block_size < 1:
             raise ValueError("block_size must be >= 1")
-        if self.max_num_batched_tokens < self.max_model_len:
-            # no chunked prefill: a whole prompt must fit in one forward pass
+        if self.max_num_batched_tokens is None:
+            self.max_num_batched_tokens = 2048 if self.enable_chunked_prefill else self.max_model_len
+        if not self.enable_chunked_prefill and self.max_num_batched_tokens < self.max_model_len:
+            # without chunked prefill a whole prompt must fit in one forward pass
             self.max_num_batched_tokens = self.max_model_len
