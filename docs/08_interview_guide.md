@@ -77,7 +77,7 @@ v0.1 是"prefill 优先"：有新请求就整步做 prefill，正在 decode 的�
 GPU 上用我自己写的两个 Triton kernel。decode kernel：每个程序负责（序列，Q 头），按块表一块块读 K/V，用 online softmax；batch 小的时候程序太少、GPU 吃不饱，所以用 flash-decoding 把长上下文切成最多 16 段并行算，再用一个小 kernel 按 `exp(m_i - M)` 加权合并。循环上界来自运行时的 context_lens，所以同一次启动能被 CUDA Graph 录制。prefill kernel：varlen，一次启动处理所有长度不同的序列，因果掩码按绝对位置，所以普通 prefill、前缀命中、分块的后续段是同一个 kernel。CPU 上退回 PyTorch：按块表 index_select 拷成连续张量再调 SDPA。和 vLLM 比：思路一样，但没有 autotune、块大小写死，也没和 FlashAttention/FlashInfer 比过。消融：把注意力换回 SDPA，B=16 从 5573.7 降到 3270.0 tok/s。
 
 **Q16：怎么保证你的实现是对的？**
-四层：(1) 单元测试覆盖块管理器、调度器（混合批、分块、抢占、水位线）、采样器；(2) 随机初始化的小 Qwen2/Qwen3 上，prefill、decode、混合批、分块时每一步的 logits 都和 HF 比对（误差 < 1e-4）；(3) Triton kernel 和 PyTorch 参考实现逐元素对比（CPU 上用 Triton 解释器，GPU 上跑真 kernel，含 bf16/fp16）；(4) 真实模型上贪心输出和 HF 逐 token 一致，包括批量、前缀命中、各种注意力后端，更大的模型用 `verify_model.py`。一共 125 个测试，开发机 CPU 121 通过 + 4 个 GPU 测试跳过，RTX 5070 上 147 个全部通过。
+四层：(1) 单元测试覆盖块管理器、调度器（混合批、分块、抢占、水位线）、采样器；(2) 随机初始化的小 Qwen2/Qwen3 上，prefill、decode、混合批、分块时每一步的 logits 都和 HF 比对（误差 < 1e-4）；(3) Triton kernel 和 PyTorch 参考实现逐元素对比（CPU 上用 Triton 解释器，GPU 上跑真 kernel，含 bf16/fp16）；(4) 真实模型上贪心输出和 HF 逐 token 一致，包括批量、前缀命中、各种注意力后端，更大的模型用 `verify_model.py`。RTX 5070 上 198 个测试全部通过（开发机 CPU 上是 121 通过 + 4 个 GPU 测试跳过，那一轮在加采样器测试之前）。
 
 **Q17：为什么测试用 float32？bf16 下怎么证明是对的？**
 bf16 只有 8 位有效位，不同 kernel 的加法顺序不同，舍入就不同，遇到两个候选分数几乎一样时 argmax 会翻转，之后整段生成都不同。所以逐 token 对比用 fp32：RTX 5070 上 0.5B、1.5B、Qwen3-1.7B 都是 8/8 完全一致。bf16 下我用 teacher forcing 一致率（每个位置喂 HF 的 token，比较 argmax，一次翻转不会连锁）：98.2–99.2%；再拿 HF 自己 eager 和 sdpa 两种注意力实现互相比，也只有 96.1–99.2%，说明这个差距是精度噪声，不是 bug。
@@ -97,7 +97,7 @@ bf16 只有 8 位有效位，不同 kernel 的加法顺序不同，舍入就不�
 ### 关于数字的追问
 
 **Q21：吞吐量提升来自哪里？**
-三类：(1) 调度——连续批处理让短请求做完就走，混合长度场景 0.5B 下 HF 409.2 vs 4656.3 tok/s；(2) 少算——前缀缓存把共享 prompt 的 prefill 从 8,704 token 降到 512；(3) 少开销——CUDA Graph、融合算子、Triton 注意力，消融里每项都能看到（见 README 第 2 节）。
+三类：(1) 调度——连续批处理让短请求做完就走，混合长度场景 0.5B 下 HF 409.2 vs 4656.3 tok/s；(2) 少算——前缀缓存把共享 prompt 的 prefill 从 8,704 token 降到 512；采样只在"候选窗口"里做，不扫整个 152k 词表，batch 64 下按 Qwen 推荐的 `top_p=0.8, top_k=20` 采样时一步 decode 从 8.30 ms 降到 3.95 ms（-52%），惩罚改到 `[rows, history]` 上算之后再加 `repetition_penalty` 是 10.62 → 4.74 ms（见 README 第 5 节）；(3) 少开销——CUDA Graph、融合算子、Triton 注意力，消融里每项都能看到（见 README 第 2 节）。
 
 **Q22：为什么模型越大，比 HF 快得越少？**
 batch=1 的 decode 每个 token 要读一遍全部权重。用"权重大小 × tok/s"估算：0.5B 约 340 GB/s，1.5B 约 500 GB/s，3B 约 550 GB/s，RTX 5070 的带宽是 672 GB/s。小模型时 HF 主要输在 kernel 启动开销上，这部分我们省掉了；大模型两边都接近带宽上限，能省的比例就小了（B=16：0.5B 6.4x，1.5B 3.2x，3B 2.3x）。要再快就得减少读的字节数（量化）或每次读权重多产出 token（更大的 batch、投机解码）。

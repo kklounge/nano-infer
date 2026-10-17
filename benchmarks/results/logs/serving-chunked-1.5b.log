@@ -1,0 +1,32 @@
+
+=== default ===
+completed 150  failed 0  in 55.5s | 2.70 req/s | output 387 tok/s | total 8176 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 265.0 | 232.5 | 469.8 | 617.2 |
+| TPOT | 20.2 | 18.5 | 33.3 | 46.7 |
+| ITL | 19.9 | 10.8 | 19.7 | 123.6 |
+| E2E | 3104.7 | 2854.3 | 4864.6 | 6036.8 |
+server: 3447 steps (258 mixed), decode-only step p50/p99/max 8.8/17.1/18.5 ms, steps with prefill p50/p99/max 109.8/155.9/270.1 ms, preemptions 0
+
+=== --max-num-batched-tokens=512 ===
+completed 150  failed 0  in 55.5s | 2.70 req/s | output 388 tok/s | total 8184 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 364.1 | 284.4 | 682.1 | 1040.6 |
+| TPOT | 18.2 | 17.1 | 26.5 | 36.0 |
+| ITL | 18.0 | 11.4 | 36.8 | 43.8 |
+| E2E | 2935.6 | 2755.9 | 4520.4 | 5412.4 |
+server: 3615 steps (881 mixed), decode-only step p50/p99/max 9.0/15.4/18.9 ms, steps with prefill p50/p99/max 33.7/44.8/159.9 ms, preemptions 0
+
+=== --no-chunked-prefill ===
+completed 150  failed 0  in 55.5s | 2.70 req/s | output 388 tok/s | total 8183 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 250.3 | 202.9 | 422.2 | 869.2 |
+| TPOT | 20.8 | 19.1 | 33.5 | 47.0 |
+| ITL | 20.5 | 10.7 | 16.8 | 199.0 |
+| E2E | 3166.4 | 2888.8 | 5044.2 | 5998.9 |
+server: 3407 steps (151 mixed), decode-only step p50/p99/max 8.6/15.9/18.2 ms, steps with prefill p50/p99/max 163.2/286.5/853.7 ms, preemptions 0
+
+saved to C:\Users\9600X\nano-infer\benchmarks\results\rtx5070-serving-1.5b-chunked-prefill.json

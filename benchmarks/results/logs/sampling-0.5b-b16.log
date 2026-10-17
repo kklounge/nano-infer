@@ -1,0 +1,39 @@
+device=cuda dtype=torch.bfloat16 backend=triton cuda_graphs=9 batch=16 prompt_len=128
+arms: new, old  rounds=5 steps=60 warmup=15
+
+  round 1/5 new: greedy=2.63  top_p=0.9, top_k=0=3.55  top_p=0.8, top_k=20=3.01  top_p=0.8, top_k=20, rep=1.05=4.24  min_p=0.05=2.87  15 greedy + 1 sampling=3.00
+  round 1/5 old: greedy=3.11  top_p=0.9, top_k=0=3.59  top_p=0.8, top_k=20=3.64  top_p=0.8, top_k=20, rep=1.05=4.07  min_p=0.05=2.85  15 greedy + 1 sampling=3.63
+  round 2/5 new: greedy=2.64  top_p=0.9, top_k=0=3.51  top_p=0.8, top_k=20=2.98  top_p=0.8, top_k=20, rep=1.05=3.89  min_p=0.05=2.87  15 greedy + 1 sampling=3.02
+  round 2/5 old: greedy=3.19  top_p=0.9, top_k=0=3.61  top_p=0.8, top_k=20=3.64  top_p=0.8, top_k=20, rep=1.05=4.20  min_p=0.05=2.87  15 greedy + 1 sampling=3.64
+  round 3/5 new: greedy=2.63  top_p=0.9, top_k=0=3.51  top_p=0.8, top_k=20=2.96  top_p=0.8, top_k=20, rep=1.05=3.52  min_p=0.05=2.87  15 greedy + 1 sampling=2.97
+  round 3/5 old: greedy=2.85  top_p=0.9, top_k=0=3.97  top_p=0.8, top_k=20=3.82  top_p=0.8, top_k=20, rep=1.05=4.24  min_p=0.05=2.95  15 greedy + 1 sampling=4.07
+  round 4/5 new: greedy=3.21  top_p=0.9, top_k=0=3.56  top_p=0.8, top_k=20=2.98  top_p=0.8, top_k=20, rep=1.05=3.45  min_p=0.05=3.31  15 greedy + 1 sampling=2.98
+  round 4/5 old: greedy=2.64  top_p=0.9, top_k=0=3.61  top_p=0.8, top_k=20=4.16  top_p=0.8, top_k=20, rep=1.05=4.08  min_p=0.05=2.86  15 greedy + 1 sampling=3.65
+  round 5/5 new: greedy=2.65  top_p=0.9, top_k=0=3.53  top_p=0.8, top_k=20=3.04  top_p=0.8, top_k=20, rep=1.05=3.50  min_p=0.05=2.90  15 greedy + 1 sampling=3.03
+  round 5/5 old: greedy=2.71  top_p=0.9, top_k=0=3.93  top_p=0.8, top_k=20=4.07  top_p=0.8, top_k=20, rep=1.05=4.14  min_p=0.05=3.22  15 greedy + 1 sampling=3.70
+
+=== best-of-5 decode step, batch 16, bfloat16, NVIDIA GeForce RTX 5070 ===
+
+| sampling configuration | old sampler (ms) | new sampler (ms) | change | tok/s | spread of rounds (new) |
+|---|---|---|---|---|---|
+| greedy | 2.64 | **2.63** | -1% | 6091 | 2.63-3.21 |
+| top_p=0.9, top_k=0 | 3.59 | **3.51** | -2% | 4562 | 3.51-3.56 |
+| top_p=0.8, top_k=20 | 3.64 | **2.96** | -19% | 5407 | 2.96-3.04 |
+| top_p=0.8, top_k=20, rep=1.05 | 4.07 | **3.45** | -15% | 4644 | 3.45-4.24 |
+| min_p=0.05 | 2.85 | **2.87** | +1% | 5579 | 2.87-3.31 |
+| 15 greedy + 1 sampling | 3.63 | **2.97** | -18% | 5388 | 2.97-3.03 |
+
+sampler phase alone (median ms, measured with a sync around the sampler call only):
+
+| sampling configuration | old | new | change |
+|---|---|---|---|
+| greedy | 0.131 | **0.123** | -6% |
+| top_p=0.9, top_k=0 | 1.108 | **1.024** | -8% |
+| top_p=0.8, top_k=20 | 1.173 | **0.669** | -43% |
+| top_p=0.8, top_k=20, rep=1.05 | 2.002 | **1.432** | -28% |
+| min_p=0.05 | 0.378 | **0.387** | +2% |
+| 15 greedy + 1 sampling | 1.148 | **0.662** | -42% |
+
+token history at measurement time: {'greedy': 204, 'top_p=0.9, top_k=0': 204, 'top_p=0.8, top_k=20': 204, 'top_p=0.8, top_k=20, rep=1.05': 204, 'min_p=0.05': 204, '15 greedy + 1 sampling': 204}
+
+saved to C:\Users\9600X\nano-infer\benchmarks\results\rtx5070-sampling-0.5b-b16.json

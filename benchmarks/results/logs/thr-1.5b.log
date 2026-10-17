@@ -1,0 +1,27 @@
+[hf] static B=1: 39.7 tok/s
+[hf] static B=4: 150.0 tok/s
+[hf] static B=16: 559.6 tok/s
+[hf] mixed: 299.6 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.19, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 159.5 tok/s
+[nano] static B=4: 579.8 tok/s
+[nano] static B=16: 1991.5 tok/s
+[nano] mixed: 1649.2 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 9 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 39.7 | 159.5 | 4.02x | 3.22 | 0.80 | 0.029 | 0.010 |
+| 4 | 150.0 | 579.8 | 3.87x | 3.41 | 0.88 | 0.040 | 0.024 |
+| 16 | 559.6 | 1991.5 | 3.56x | 3.66 | 1.03 | 0.126 | 0.094 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 299.6 | 11.68 | 8.88 |
+| nano-infer, continuous batching | 1649.2 | 2.12 | 1.09 |
+
+saved to C:\Users\9600X\nano-infer\benchmarks\results\rtx5070-qwen2.5-1.5b-instruct.json

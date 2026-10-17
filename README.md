@@ -12,7 +12,7 @@
 - 🎲 **完整的采样**：greedy、temperature、top-k、top-p、min-p、repetition / presence / frequency penalty、min_tokens、stop 字符串、stop token、每个请求自己的随机种子、logprobs、n 个候选
 - 🌐 **OpenAI 兼容 HTTP 服务**：`/v1/completions`、`/v1/chat/completions`，流式输出（SSE）、usage（含缓存命中 token 数）、`/metrics`（Prometheus）、`/health`
 - 🖥️ **命令行**：`python -m nanoinfer serve / chat / generate / info`
-- ✅ **正确性**：float32 下贪心输出和 Hugging Face transformers **逐 token 一致**（含 RTX 5070 上 Qwen2.5-0.5B / 1.5B、Qwen3-1.7B）；125 个测试（开发机 CPU：121 通过 + 4 个 GPU 测试跳过；RTX 5070：147 通过，GPU 上额外跑 bf16/fp16 的 kernel 测试）
+- ✅ **正确性**：float32 下贪心输出和 Hugging Face transformers **逐 token 一致**（含 RTX 5070 上 Qwen2.5-0.5B / 1.5B、Qwen3-1.7B）；RTX 5070 上 **198 个测试全部通过**（GPU 上额外跑 bf16/fp16 的 kernel 测试）
 
 **在 RTX 5070 上（Qwen2.5-0.5B，bf16）：吞吐量是 Hugging Face `generate()` 的 5.9–7.1 倍（静态批处理）和 11.4 倍（长度不一的并发请求）；比本项目自己的 v0.1 快 2.4–3.1 倍。** 详见[性能测试](#性能测试结果rtx-5070-实测)。
 
@@ -144,8 +144,8 @@ python -m pytest tests -q
 
 | 环境 | 结果 |
 |---|---|
-| 开发服务器（Linux，8 vCPU Xeon，**无 GPU**；Triton kernel 用解释器 `TRITON_INTERPRET=1` 在 CPU 上以 fp32 测） | **121 passed, 4 skipped**（跳过的是只能在 GPU 上跑的 `test_cuda.py`） |
-| Patrick 的 PC（Windows 11，**RTX 5070**，torch 2.11.0+cu128，triton-windows 3.6） | **147 passed**（GPU 上 Triton 测试额外跑 bf16 / fp16） |
+| Patrick 的 PC（Windows 11，**RTX 5070**，torch 2.11.0+cu128，triton-windows 3.6） | **198 passed**（2026-10-17 实测；GPU 上 Triton 测试额外跑 bf16 / fp16） |
+| 开发服务器（Linux，8 vCPU Xeon，**无 GPU**；Triton kernel 用解释器 `TRITON_INTERPRET=1` 在 CPU 上以 fp32 测） | **121 passed, 4 skipped**（跳过的是只能在 GPU 上跑的 `test_cuda.py`）——这一行是加采样器测试之前测的，没有在那台机器上复测 |
 
 | 测试文件 | 内容 |
 |---|---|
@@ -176,6 +176,10 @@ python -m pytest tests -q
 ## 性能测试结果（RTX 5070 实测）
 
 **硬件和设置**：NVIDIA GeForce RTX 5070（12 GB），Windows 11，torch 2.11.0+cu128，triton-windows 3.6，**bfloat16**。基线是 Hugging Face `model.generate()`（贪心、静态批处理、SDPA 注意力）。测试前 `nvidia-smi` 显示 GPU 只被桌面程序占用约 2 GB、利用率 0%。测试日期 2026-10-17。原始数据在 `benchmarks/results/rtx5070-*.json`，完整输出在 `benchmarks/results/logs/`。
+
+**第 1–4 节都是贪心（`temperature=0`）**：三个 benchmark 脚本都写死了 `temperature=0`，所以这几节完全不碰 top-k / top-p / min-p 和惩罚那条路径。采样配置的开销单独测，见[第 5 节](#5-采样配置的开销候选窗口改写前后)。
+
+**2026-10-17 复测**：采样器改成候选窗口之后，在同一块显卡上重跑了整个套件，确认贪心路径没有变化。复测时机器上还开着一批后台程序（浏览器、聊天软件等），CPU 占用约 36%；显卡本身是空闲的（839 MiB、利用率 2–3%，实测拷贝带宽 528 GB/s = 规格 672 GB/s 的 79%，显存频率满速、`clocks_throttle_reasons.active` 为 0）。取多次重复里最快的一次（best-of-9/12），贪心结论复现：Qwen2.5-1.5B 的 B=1 完全一致（159.7 vs 159.8 tok/s），其余各点落在上面表格的 86–99%（静态批处理 88–99%，混合长度 86–93%）；分块预填充的 ITL p99 复现了同样的长尾差别（不分块 / 2048 / 512 分别是 199.0 / 123.6 / 43.8 ms，对比上表的 190.7 / 116.5 / 37.9），前缀缓存把平均 TTFT 从关掉时的 83.9 ms 降到开启时的 38.9 ms。**表格里保留的仍然是那次更安静的测量**：CPU 被抢占时 HF 基线掉得比本引擎更多，用复测的数字反而会**高估**本项目（例如 Qwen2.5-1.5B 的 B=1 倍数会从 3.20x 变成 3.75x）。复测的原始数据在 `benchmarks/results/rtx5070-*-rerun-2026-10-17.json`。
 
 ### 1. Qwen2.5-0.5B-Instruct：HF vs v0.1 vs v0.2
 
@@ -234,7 +238,41 @@ python -m pytest tests -q
 | 关 | 61.7 / 144.6 | 10.9 | 1085 |
 | **开** | **34.0 / 74.5** | **6.9** | **680** |
 
-### 5. 开发机 CPU 上的数字（v0.1，仅供参考）
+### 5. 采样配置的开销（候选窗口改写前后）
+
+上面四节都是贪心，不碰采样路径；这一节专门测采样。做法：同一个进程、同一个加载好的模型，把 `runner.sampler` 在**改写前**（commit `4aaf1f1`：整列 `sort` + 词表大小的惩罚缓冲区）和**现在**（候选窗口 + 在 `[rows, history]` 上做惩罚）之间来回替换，每一轮两个实现各测一遍、交替进行，取最好的一轮（best-of-5）。这样后台负载的漂移会同等地落在两边。Qwen2.5-0.5B，bf16，prompt 128 token，测量时每行历史 204 token，显卡空闲。原始数据 `benchmarks/results/rtx5070-sampling-0.5b-b{1,16,64}.json`。
+
+**一步 decode 的总耗时**（ms，旧 / 新，越小越好）：
+
+| 采样配置 | batch 1 | batch 16 | batch 64 |
+|---|---|---|---|
+| 贪心（**对照组**，不碰改动的代码） | 2.91 / 2.91 | 2.64 / 2.63 | 3.47 / 3.49 |
+| `top_p=0.9, top_k=0` | 3.24 / 3.19 | 3.59 / 3.51 | 8.08 / **7.67**（-5%） |
+| `top_p=0.8, top_k=20`（Qwen 推荐） | 3.26 / 3.24 | 3.64 / **2.96**（-19%） | 8.30 / **3.95**（**-52%**） |
+| 上一行再加 `repetition_penalty=1.05` | 3.69 / 3.68 | 4.07 / **3.45**（-15%） | 10.62 / **4.74**（**-55%**） |
+| `min_p=0.05` | 3.08 / 3.06 | 2.85 / 2.87 | 4.47 / 4.45 |
+| 整批贪心 + 1 个采样请求 | — | 3.63 / **2.97**（-18%） | 8.34 / **3.93**（**-53%**） |
+
+**只看采样这一步**（ms，旧 / 新；在采样调用前后单独同步测的，所以比上表的分摊值更能看出差别）：
+
+| 采样配置 | batch 16 | batch 64 |
+|---|---|---|
+| 贪心 | 0.131 / 0.123 | 0.139 / 0.139 |
+| `top_p=0.9, top_k=0` | 1.108 / 1.024 | 4.765 / **4.331**（-9%） |
+| `top_p=0.8, top_k=20` | 1.173 / **0.669**（-43%） | 4.970 / **0.649**（**-87%**） |
+| 上一行再加 `repetition_penalty=1.05` | 2.002 / **1.432**（-28%） | 9.008 / **3.014**（-67%） |
+| `min_p=0.05` | 0.378 / 0.387 | 1.139 / 1.140 |
+| 整批贪心 + 1 个采样请求 | 1.148 / **0.662**（-42%） | 5.025 / **0.666**（**-87%**） |
+
+**怎么读**：
+
+- **贪心是对照组**：它走的是 `argmax` 快路径，完全不碰改动过的代码，三个 batch 下改写前后都在 ±1% 以内。这正是这组数字的意义——它说明这次改写确实只影响采样路径。
+- **收益随 batch 变大**：采样的工作量是 `[batch, 词表]`，随 batch 线性增长；而 decode 读权重的成本不随 batch 变。所以 batch 1 没有变化（给一行 152k 列排序本来就不贵，瓶颈是读权重），batch 16 省 19%，batch 64 省 52%。**单路聊天不要指望这个改动。**
+- **`top_k=0` 配 `top_p<1` 省不掉**（batch 64 只快 5%）：没有 top-k 限制候选个数，就必须把整列排序，才知道累积概率在哪里到 p。这是算法本身的要求，不是实现问题。
+- **`min_p` 单独用也省不掉**：min-p 只和最大值比，不需要排序，本来就是在整列上原地做的，所以改写前后一样。
+- **一个采样请求不再拖累整批贪心请求**：batch 64 里 63 个贪心 + 1 个采样，从 8.34 ms 降到 3.93 ms，和整批都采样的 3.95 ms 基本相同。原因是给贪心行填 `top_k=1`，窗口不再被默认的 `top_k=0` 撑到整个词表（见 [05 篇](docs/05_model_and_attention.md)）。
+
+### 6. 开发机 CPU 上的数字（v0.1，仅供参考）
 在没有 GPU 的开发服务器（Intel Xeon 8 vCPU，6 线程，bf16）上测过 v0.1：混合长度场景 HF 115.6 → nano 233.1 tok/s，共享前缀场景首字延迟 2.822 s → 0.245 s（`benchmarks/results/cpu-6threads.json`）。**这些是 CPU 数字，不能和上面的 GPU 数字混用。**
 
 ### 自己测
@@ -245,6 +283,10 @@ python benchmarks/bench_serving.py --model models/Qwen2.5-1.5B-Instruct --num-re
 python scripts/verify_model.py --model models/Qwen2.5-1.5B-Instruct --dtype float32
 python benchmarks/profile_step.py --model models/Qwen2.5-0.5B-Instruct
 ```
+
+大的模型（1.5B / 3B / Qwen3-1.7B）要加 `--scenarios static mixed`：默认还会跑 `prefix` 场景，而那个场景会在外层引擎还活着的时候再建一个引擎，12 GB 显存上权重会被算两遍，KV 缓存就分不到块了。
+
+第 5 节的采样对比**不是**上面这些脚本测出来的——它们都写死了 `temperature=0`。做法是在一个进程里加载一次模型，然后把 `runner.sampler` 在旧实现（`git show 4aaf1f1:nanoinfer/engine/sampler.py`，类的构造参数和现在相同，可以直接换上去）和当前实现之间交替替换：batch 64、prompt 128 token、每个采样配置先跑 15 步预热再计时 60 步取中位数，两个实现每轮各测一遍、共 5 轮，最后取最好的一轮。
 
 ---
 

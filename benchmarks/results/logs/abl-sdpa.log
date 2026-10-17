@@ -1,0 +1,22 @@
+[nano] {'attn_backend': 'sdpa', 'cuda_graphs': 36, 'cuda_graph_capture_s': 1.11, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 229.5 tok/s
+[nano] static B=4: 938.2 tok/s
+[nano] static B=16: 3104.8 tok/s
+[nano] mixed: 2470.8 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 9 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | - | 229.5 | - | - | 0.56 | - | 0.021 |
+| 4 | - | 938.2 | - | - | 0.55 | - | 0.041 |
+| 16 | - | 3104.8 | - | - | 0.66 | - | 0.125 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| nano-infer, continuous batching | 2470.8 | 1.42 | 0.77 |
+
+saved to C:\Users\9600X\nano-infer\benchmarks\results\rtx5070-qwen2.5-0.5b-sdpa.json

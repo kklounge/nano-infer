@@ -10,7 +10,7 @@
 python -m pytest tests -q
 ```
 
-实测：开发服务器（Linux CPU，无 GPU）**121 passed, 4 skipped**；RTX 5070（Windows）**147 passed**。GPU 上多出来的是 Triton kernel 在 bf16 / fp16 下的测试；CPU 上 Triton kernel 用解释器（`TRITON_INTERPRET=1`，`tests/conftest.py` 自动设置）以 fp32 运行——解释器跑 bf16 结果不可靠，所以 CPU 上只测 fp32。
+实测：RTX 5070（Windows）**198 passed**（2026-10-17）；开发服务器（Linux CPU，无 GPU）**121 passed, 4 skipped**（加采样器测试之前测的，没有复测）。GPU 上多出来的是 Triton kernel 在 bf16 / fp16 下的测试；CPU 上 Triton kernel 用解释器（`TRITON_INTERPRET=1`，`tests/conftest.py` 自动设置）以 fp32 运行——解释器跑 bf16 结果不可靠，所以 CPU 上只测 fp32。
 
 | 测试文件 | 测什么 | 需要下载模型吗 |
 |---|---|---|
@@ -61,6 +61,8 @@ python benchmarks/bench_throughput.py --model models/Qwen2.5-0.5B-Instruct
 
 消融（ablation）用命令行开关：`--enforce-eager`（关 CUDA Graph）、`--attn-backend sdpa`、`--no-chunked-prefill`、`--max-num-batched-tokens N`。`benchmarks/profile_step.py` 把一步 decode 拆成准备输入 / 前向 / lm_head / 采样四段计时。
 
+**这三个场景（以及 `bench_serving.py`、`profile_step.py`）都写死了 `temperature=0`**，也就是全部走贪心。好处是和 HF 对比时"标准答案"唯一、可复现；代价是它们**完全不覆盖采样路径**——top-k / top-p / min-p、指数竞赛抽样、repetition / presence / frequency penalty 一个都不碰。所以改采样器时，这些 benchmark 不会有任何变化（这反过来是个有用的对照组），采样的开销要单独测，见 README 第 5 节。
+
 ## 3. 性能：在线服务（`benchmarks/bench_serving.py`）
 
 离线吞吐只回答"一共多快"，线上用户感受到的是延迟。这个脚本自己启动服务器（或连接 `--url`），按泊松过程（Poisson，随机间隔）发出流式 HTTP 请求，统计：
@@ -76,6 +78,16 @@ python benchmarks/bench_throughput.py --model models/Qwen2.5-0.5B-Instruct
 
 ## 4. 注意
 - **数字只对测量它的那台机器有效**。README 的 GPU 数字来自 RTX 5070，CPU 数字来自开发服务器，两者不能混用。
-- 测之前看一眼 `nvidia-smi`，确认没有别的程序在用 GPU（本项目测试时只有桌面程序占约 2 GB、利用率 0%）。
+- 测之前看一眼 `nvidia-smi`，确认没有别的程序在用 GPU（本项目测试时只有桌面程序占约 2 GB、利用率 0%）。一边开着游戏一边测，实测拷贝带宽会从 528 GB/s 掉到约 211 GB/s，单次结果能差 ±13%。
 - 和 HF 对比时两边用同样的数据类型（bf16）。
+
+### 一个真实踩过的坑：显卡空闲不等于可以测了
+2026-10-17 复测时遇到的情况：关掉游戏后显卡确实空闲了（839 MiB、利用率 2–3%、带宽 528 GB/s = 规格的 79%、无降频），但机器上还开着一批后台程序，**CPU 占用约 36%**。结果所有数字一致地低了约 9%。
+
+两个教训：
+
+1. **要看重复之间的离散度，不只看中位数。** 更早那次安静环境下的三次重复是 0.377 / 0.378 / 0.376 s（差 0.5%）；复测时同一个点是 0.410 / 0.411 / 0.411 s——同样很稳，但稳在一个更慢的值上。而第一次只跑 3 次重复时是 0.416 / 0.408 / 0.378 s（差 10%），最快的那次恰好等于安静环境的值。**离散度大说明被抢占了，此时"最快的一次"比中位数更接近真实值**；离散度小也不代表环境干净，只代表干扰稳定。
+2. **CPU 被抢占会让倍数变好看，这是个陷阱。** batch=1 的 decode 瓶颈是 CPU 发 kernel 的开销（这正是 CUDA Graph 要消掉的东西），而 HF `generate()` 在这上面花的时间比本引擎多得多，所以 CPU 一紧张，**HF 掉得比本引擎更多**：复测时 Qwen2.5-1.5B 的 B=1 倍数从 3.20x "涨"到 3.75x。看到倍数无缘无故变好，先怀疑基线被拖慢了，而不是自己变快了。
+
+判断瓶颈在 CPU 还是显存带宽，可以粗算"权重大小 × tok/s"：0.5B 在 B=1 时约 310 GB/s，而实测可用带宽是 528 GB/s，离上限还远，所以那一档是 CPU 开销主导的。
 - 用随机 token 当 prompt（固定种子），所以输出内容没有意义，只看速度；`ignore_eos` 保证输出长度固定。

@@ -1,0 +1,114 @@
+{
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "torch": "2.11.0+cu128",
+    "cpu_count": 12,
+    "torch_threads": 6,
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "gpu": "NVIDIA GeForce RTX 5070"
+  },
+  "config": {
+    "model": "models/Qwen2.5-0.5B-Instruct",
+    "device": "auto",
+    "dtype": "auto",
+    "batch_sizes": [
+      1,
+      4,
+      16
+    ],
+    "input_len": 128,
+    "output_len": 128,
+    "repeats": 9,
+    "mixed_hf_batch": 16,
+    "scenarios": [
+      "static",
+      "mixed"
+    ],
+    "engines": [
+      "nano"
+    ],
+    "cuda_graph": false,
+    "enforce_eager": true,
+    "attn_backend": "auto",
+    "no_chunked_prefill": false,
+    "max_num_batched_tokens": null,
+    "no_prefix": false,
+    "threads": null,
+    "out": "C:\\Users\\9600X\\nano-infer\\benchmarks\\results\\rtx5070-qwen2.5-0.5b-eager.json"
+  },
+  "engines": {
+    "nano": {
+      "engine": "nano-infer",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "attn_backend": "triton",
+      "cuda_graphs": 0,
+      "cuda_graph_capture_s": 0.0,
+      "chunked_prefill": true,
+      "max_num_batched_tokens": 2048,
+      "kv_blocks": 8192,
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 0.7671105000044918,
+          "tok_per_s": 166.85992435151195,
+          "ttft_s": 0.006187399994814768,
+          "all_seconds": [
+            0.7928011999902083,
+            0.7992426000128035,
+            0.8215388999960851,
+            0.8265831000026083,
+            0.7341435000125784,
+            0.7565240999974776,
+            0.7671105000044918,
+            0.7337501000001794,
+            0.6697071000089636
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 0.7354848999966634,
+          "tok_per_s": 696.1393768958719,
+          "ttft_s": 0.010500299998966511,
+          "all_seconds": [
+            0.7130600999953458,
+            0.7097999999969034,
+            0.7504941999941366,
+            0.7736978000029922,
+            0.7495328999939375,
+            0.7354848999966634,
+            0.7049447999888798,
+            0.7387684999994235,
+            0.7240992000006372
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 0.7665368000016315,
+          "tok_per_s": 2671.7569202100162,
+          "ttft_s": 0.03131661249426543,
+          "all_seconds": [
+            0.7831539999897359,
+            0.8000249000033364,
+            0.7665368000016315,
+            0.7504059000057168,
+            0.7520624000026146,
+            0.748961799996323,
+            0.7449950000009267,
+            0.8527679999970132,
+            0.7884540999948513
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 1.4804797000106191,
+        "tok_per_s": 2362.747695881889,
+        "mean_latency_s": 0.708262700000887
+      },
+      "prefix": null
+    }
+  }
+}
