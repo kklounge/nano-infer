@@ -1,0 +1,10 @@
+# Install PyTorch FIRST from https://pytorch.org (pick the CUDA build if you have an NVIDIA GPU), then:
+torch>=2.5
+safetensors
+transformers>=4.56      # tokenizer + correctness reference only; the model itself is our own code
+huggingface_hub
+tqdm
+fastapi                 # HTTP server (optional)
+uvicorn
+pytest                  # tests
+httpx
