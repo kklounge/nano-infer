@@ -57,54 +57,104 @@ MLP(x) = down_proj( silu(gate_proj(x)) * up_proj(x) )
 ```
 两条路：一条经过 SiLU 激活当"门"，一条是普通线性变换，相乘后再投影回 896 维。
 
+### 合并投影（merged projections）
+官方权重里 q_proj、k_proj、v_proj 是三个矩阵，gate_proj、up_proj 是两个。它们的输入完全一样（同一个 x），所以可以把权重**竖着拼成一个大矩阵**：一次矩阵乘法算出 `[q | k | v]`，再切开。本项目的模型里只有 `qkv_proj` 和 `gate_up_proj` 两个参数，加载权重时 `loader.py` 的 `PACKED` 表负责把官方的 `q_proj.weight` 拷到 `qkv_proj.weight` 的前 896 行、`k_proj` 拷到接下来的 128 行……（并检查每一行都被填过）。decode 时每层少了 3 次 kernel 启动，大矩阵乘法也更能吃满 GPU。
+
 ### Qwen3 的区别
 Qwen3 多了 **QK-Norm**（在 RoPE 之前对每个头的 q、k 做 RMSNorm），q/k/v 投影没有偏置（bias）。`ModelConfig` 会根据 `model_type` 自动切换，测试里用随机初始化的小 Qwen3 验证过和 HF 一致。
 
 ## 3. 扁平 token 布局（flat layout）
 
-模型的输入不是常见的 `[batch, seq_len]`，而是所有序列首尾相接的一维 `[T]`（见 03 篇的"打包"）。线性层、RMSNorm、MLP 都是逐 token 的，不在乎 token 属于谁；只有注意力需要知道边界，它从 `AttentionMetadata` 里读取：
+模型的输入不是常见的 `[batch, seq_len]`，而是所有序列首尾相接的一维 `[T]`（见 03 篇的"打包"）。线性层、RMSNorm、MLP 都是逐 token 的，不在乎 token 属于谁；只有注意力需要知道边界，它从 `AttentionMetadata` 里读取。一个 batch 里 **decode 的序列排在前面，prefill 段排在后面**：
 
 | 字段 | 含义 |
 |---|---|
-| `slot_mapping [T]` | 每个新 token 的 K/V 写到哪个槽位 |
-| `cu_seqlens_q / cu_seqlens_k` | prefill：每个序列新 token / 总 token 的起止位置 |
-| `block_tables [B, max_blocks]` | 每个序列的块表 |
-| `context_lens [B]` | decode：每个序列当前总长度 |
+| `slot_mapping [T]` | 每个新 token 的 K/V 写到哪个槽位（在 GPU 上由块表和位置算出来，不在 Python 里循环） |
+| `num_decode` | 前多少个序列是 decode（每个 1 个 token） |
+| `decode_block_tables / decode_context_lens` | decode 部分：每个序列的块表和总长度 |
+| `cu_seqlens_q` | prefill 部分：每段新 token 的起止位置 |
+| `seqlens_k` | prefill 部分：每个序列"已缓存 + 这一段"的总长度 |
+| `prefill_block_tables` | prefill 部分的块表 |
 
-## 4. 注意力的两条路径（`nanoinfer/model/attention.py`）
+所有整数输入（token id、位置、块表……）在 CPU 上拼成**一个**张量，用锁页内存（pinned memory）一次性异步拷到 GPU（`ModelRunner._to_device`），每步只有一次主机→显卡的传输。
 
-### Prefill
-对每个序列循环（prompt 长度不同，循环最直观）：
-- **没有前缀命中**：K、V 就是这一步刚算的，直接用 SDPA 的 `is_causal=True`（因果掩码：只能看自己和前面）。
-- **有前缀命中**：从缓存里按块表 gather 出完整的 K、V，用"右下对齐"的因果掩码。
+## 4. 注意力（`nanoinfer/model/attention.py` + `triton_attention.py`）
 
-### Decode
-完全向量化：
-1. 为 batch 中每个序列算出 `[B, 最长长度]` 的槽位矩阵（每次前向只算一次，所有层共用：`AttentionMetadata.prepare()`）。
-2. 一次 `index_select` 读出所有 K、V。
-3. 用 mask 屏蔽填充位置，调用 SDPA。
-4. 如果所有序列一样长（比如 batch=1），就不需要 mask。
+每一层的注意力分两步：先把这一步所有新 token 的 K/V 写进缓存（store），再算注意力。`paged_attention()` 把 batch 切成 decode 部分和 prefill 部分，各走各的路径。
 
-### 两个后端（backend）
-- `sdpa`（默认）：`torch.nn.functional.scaled_dot_product_attention`，PyTorch 的融合算子，在 GPU 上会自动用 FlashAttention 类的 kernel。
-- `naive`：教科书公式 `softmax(QKᵀ/√d)·V`，一行一行写出来，方便学习。测试保证两者结果一致。
+### 三个后端（`attn_backend`）
+| 后端 | 什么时候用 | 怎么算 |
+|---|---|---|
+| `triton` | 有 NVIDIA GPU 且装了 Triton 时自动选 | 自己写的 Triton kernel，**直接在分页的缓存上算**，不拷贝 |
+| `sdpa` | CPU 默认 | 先按块表 `index_select` 把 K/V 拼成连续张量，再调用 PyTorch 的 SDPA |
+| `naive` | 学习用 | 教科书公式 `softmax(QKᵀ/√d)·V` |
 
-## 5. 加载权重（`nanoinfer/model/loader.py`）
+测试保证三者结果一致（`test_triton_attention.py` 在 CPU 上用 Triton 解释器 `TRITON_INTERPRET=1` 跑，在 GPU 上跑真的 kernel）。
+
+### Triton decode kernel：flash-decoding
+decode 时每个序列只有 1 个 query。kernel 的每个程序（program）负责一个（序列，Q 头），按块表一块一块读 K、V，用 **online softmax**（边读边维护当前最大值 m、分母 l 和加权和 acc，FlashAttention 的核心技巧）算完，不需要把 `[长度]` 的分数存下来。
+
+问题：batch=1 时只有 14 个 Q 头 = 14 个程序，而 RTX 5070 有 48 个 SM，大部分 GPU 闲着。**flash-decoding** 的做法：把长上下文切成几段（partition），每段一个程序并行算出局部的 (m, l, acc)，再用一个很小的 reduce kernel 合并：
+
+```
+out = Σ_i exp(m_i - M) · acc_i  /  Σ_i exp(m_i - M) · l_i      (M = max_i m_i)
+```
+
+`decode_split_plan()` 决定切几段：上下文 ≤ 512 不切，否则每段 512 的倍数、最多 16 段。只有少数几种方案，Triton 只需要编译少数几个版本。循环的上界来自 `context_lens` 张量（运行时数据），所以**同一次 kernel 启动适用于任何长度——可以被 CUDA Graph 录制**。
+
+GQA：`kvh = h // N_REP`，7 个共享同一组 KV 的 Q 头读的是同一块显存（会命中 L2 缓存），不需要复制 K/V。
+
+### Triton prefill kernel：varlen + 分页 + 因果
+prefill 段（完整 prompt、prompt 的某一段、或前缀缓存命中后剩下的部分）的 query 是这一段的新 token，key 是从序列开头到这一段末尾的所有 token（前面的已经在缓存里）。kernel 的每个程序负责（序列，Q 头，64 行 query），用 `tl.dot` 做分块矩阵乘法 + online softmax。
+
+因果掩码按**绝对位置**：第 j 个新 token 的位置是 `ctx_start + j`，只能看位置 ≤ 它的 key。这样"普通 prefill"、"前缀命中"和"分块预填充的后续段"是**同一个 kernel**，所有长度不同的序列一次启动算完（不再按序列做 Python 循环）。
+
+几个踩过的坑：fp32 下 `tl.dot` 默认用 TF32（精度只有 10 位），和 PyTorch 对不上，要指定 `input_precision="ieee"`；超出序列长度的 tile 整行都是 -inf，`acc / l` 会变成 NaN，要先用 `tl.where` 保护；循环变量的类型在 Triton 里必须从第一次迭代起就固定。
+
+### PyTorch 后端（sdpa / naive）
+- **prefill**：对每个序列循环；没有已缓存部分时直接 `is_causal=True`，否则从缓存 gather 出完整 K/V，用"右下对齐"的因果掩码。
+- **decode**：完全向量化：算出 `[B, 最长长度]` 的槽位矩阵（每次前向只算一次，所有层共用），一次 `index_select` 读出所有 K、V，用 mask 屏蔽填充位置，调用 SDPA。
+
+## 5. 融合算子（fused ops，`nanoinfer/model/triton_ops.py`）
+
+PyTorch eager 模式下每个小运算都是一个独立的 GPU kernel：一次 RMSNorm 大约 7 个 kernel（转 fp32、平方、求均值、rsqrt、相乘、转回、乘权重），q、k 的 RoPE 大约 12 个，写 KV 缓存 2 个。decode 时每个 kernel 只处理几 KB 数据，GPU 的时间都花在"启动 kernel"上了。四个融合 kernel 把它们各自合成一个：
+
+| kernel | 做什么 |
+|---|---|
+| `fused_add_rmsnorm` | `residual += x; out = RMSNorm(residual)`（残差加法和下一层的归一化合并） |
+| `rmsnorm` | 普通 RMSNorm（也用于 Qwen3 的 q/k norm） |
+| `rope_and_store_kv` | 原地旋转 q、k（RoPE），并把 k、v 写进 KV 缓存的槽位 |
+| `silu_and_mul` | 在合并的 `[gate | up]` 上算 `silu(gate) * up` |
+
+为了让残差加法能和归一化融合，模型的每一层显式地传递残差流（`hidden, residual = layer(hidden, residual)`），和 vLLM 的写法一样。舍入步骤刻意和 HF 一致（先在 fp32 里归一化，转回模型精度，再乘权重），测试里和 PyTorch 路径逐元素对比。GPU 上默认开启，`use_fused_ops=False` 可关闭。
+
+为什么不用 `torch.compile`？在 RTX 5070 上试过，能用，但首次编译要等、生成的代码是黑盒，不好讲清楚；手写的四个 kernel 每个只有二三十行，面试时能逐行解释。
+
+## 6. 加载权重（`nanoinfer/model/loader.py`）
 
 1. 在 `meta` 设备上搭建模型骨架：只有形状，不占内存，不做随机初始化。
 2. `to_empty()` 在目标设备（CPU/GPU）上分配未初始化的内存。
-3. 用 `safetensors.safe_open` 逐个读取权重，按**名字**拷进对应参数（我们的参数名和官方 checkpoint 完全一致，比如 `model.layers.0.self_attn.q_proj.weight`）。
+3. 用 `safetensors.safe_open` 逐个读取权重，按**名字**拷进对应参数（名字和官方 checkpoint 一致，比如 `model.layers.0.input_layernorm.weight`；q/k/v、gate/up 按 `PACKED` 表拷进合并矩阵的对应行）。
 4. 检查是否有缺失的权重；绑定 `lm_head` 和 embedding（tied embeddings）。
 
 这样峰值内存约等于模型本身大小，不会出现"先在 float32 里随机初始化一遍再覆盖"的浪费。
 
-## 6. CUDA Graph（实验性，仅 GPU）
+## 7. CUDA Graph（GPU 默认开启）
 
-decode 每一步要启动几百个小 GPU kernel，在小模型上，**启动开销（launch overhead）**甚至比计算本身还大。CUDA Graph 把一整步的 kernel 序列"录制"一次，以后一次性"回放"。
+decode 每一步要启动几百个 GPU kernel（24 层 × 每层十几个），在小模型上，CPU 发射 kernel 的时间比 GPU 计算本身还长。CUDA Graph 把一整步 decode 的 kernel 序列"录制"一次，以后一次性"回放"，CPU 只需要发一条命令。
 
-限制：录制时张量形状必须固定。所以我们：
-- 录制几个固定的 batch 大小（1, 2, 4, 8, 16, 32, …），实际 batch 向上补齐到最近的那个；
-- 注意力总是 gather `max_model_len` 长度并用 mask；
-- 补齐的行写入"草稿块"，不会污染真实数据。
+限制：录制时张量的形状和地址必须固定。所以：
+- 预先录制几个 batch 大小（1, 2, 4, 8, 16, 24, 32, 48, 64, …，最大 `max_cuda_graph_batch`），实际 batch 向上补齐到最近的那个；补齐的行写进一个专门的"草稿块"（scratch block），注意力只看 1 个 key，不会污染真实数据。
+- 所有输入（token id、位置、槽位、长度、块表）都放在固定的"静态缓冲区"里，每步只把新数据拷进去（一次 H2D 拷贝），然后 `graph.replay()`。
+- Triton 后端的循环上界来自运行时的 `context_lens`，一张图适用于任何上下文长度；sdpa 后端要 gather 固定长度，所以额外按上下文长度分桶（256, 512, …, max_model_len）各录一张，用最小的够用的那张。
+- 混合批（有 prefill 段）的那一步不走图，走普通（eager）路径。
 
-默认关闭（`--cuda-graph` 打开），因为**它没有在真实 GPU 上测试过**（开发机没有 GPU）。录制失败会自动退回普通模式。但它用到的"静态补齐"的 decode 逻辑是纯 PyTorch，`tests/test_tiny_model_vs_hf.py::test_static_padded_decode_matches_eager` 在 CPU 上验证了它和普通路径结果一致。
+`enforce_eager=True`（命令行 `--enforce-eager`）关闭它做对比。录制失败会自动退回普通模式。"静态补齐"的 decode 逻辑是纯 PyTorch，`test_tiny_model_vs_hf.py::test_static_padded_decode_matches_eager` 在 CPU 上验证了它和普通路径结果一致；`test_cuda.py` 在真实 GPU 上验证录制/回放的输出和普通模式逐 token 相同。
+
+## 8. 采样器（`nanoinfer/engine/sampler.py`）
+
+一个 batch 里每个请求可以有不同的采样设置，采样器全部用批量张量运算处理，除了最后把 token 取回 CPU，中间没有 GPU 同步：
+1. 惩罚：repetition penalty（HF 的定义：正 logit 除以 p，负 logit 乘以 p）、presence / frequency penalty（OpenAI 的定义），只对出现过的 token 生效；
+2. 温度，然后 top-k、top-p、min-p 过滤；
+3. 抽样用"指数竞赛"（exponential race）：`argmax(p / E)`，E 是独立的指数分布随机数，和按概率抽样数学上等价，但不需要 `torch.multinomial` 的同步；设置了 `seed` 的请求用自己的 `torch.Generator`，结果可复现；
+4. 需要时返回 logprobs（所选 token 和前 k 个候选）。

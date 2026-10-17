@@ -10,6 +10,8 @@ Two measurements over a set of chat prompts (English + Chinese):
      every position. In bfloat16 two correct implementations still disagree on near-ties now and
      then (different kernels round differently), and one flip changes everything after it in (1);
      (2) does not cascade, so it is the fairer bf16 metric. In float32, (1) should match exactly.
+  3. noise floor: the same teacher-forced agreement between HF and HF itself with its other
+     attention implementation (eager vs sdpa). Our agreement should be about as high as this.
 """
 
 import argparse
@@ -65,6 +67,18 @@ def main():
                 out = hf(torch.tensor([[nxt]], device=args.device), past_key_values=past, use_cache=True)
                 past = out.past_key_values
             refs.append(ref)
+        # Noise floor: how often do two CORRECT implementations disagree at this precision?
+        # Re-run HF itself with its other attention implementation (eager instead of sdpa),
+        # teacher-forced on the same reference tokens.
+        hf_agree = hf_total = 0
+        try:
+            hf.set_attn_implementation("eager")
+            for p, ref in zip(prompts, refs):
+                logits = hf(torch.tensor([p + ref[:-1]], device=args.device)).logits[0, len(p) - 1:]
+                hf_agree += int((logits.float().argmax(-1).cpu() == torch.tensor(ref)).sum())
+                hf_total += len(ref)
+        except Exception as e:          # older transformers without set_attn_implementation
+            print("noise-floor check skipped:", e)
     del hf
     gc.collect()
     if args.device == "cuda":
@@ -101,7 +115,8 @@ def main():
            "attn_backend": llm.attn_backend, "cuda_graphs": len(llm.runner.graphs),
            "greedy_exact_matches": f"{sum(n == len(r) for n, r in zip(prefix, refs))}/{len(refs)}",
            "greedy_matching_prefix_tokens": prefix, "teacher_forced_top1_agreement": agree / total,
-           "positions_checked": total}
+           "positions_checked": total,
+           "hf_eager_vs_hf_sdpa_top1_agreement": hf_agree / hf_total if hf_total else None}
     print(json.dumps(res, indent=2, ensure_ascii=False))
     chat = llm.chat([{"role": "user", "content": "What is 2 + 3? Reply with just the number."}],
                     SamplingParams(temperature=0, max_tokens=8))[0].text

@@ -49,10 +49,11 @@ hash(第 i 块) = hash( hash(第 i-1 块), 第 i 块的 16 个 token )
 ## 6. 几个容易出错的细节（面试加分点）
 
 1. **只缓存写满的块**。最后一块没写满，后面 decode 还会往里写新 token，不能共享。
-2. **至少要算最后一个 token**。如果整个 prompt 都命中缓存，我们就没有 logits 去采样第一个新 token 了。本项目的处理：如果命中的是 prompt 的最后一块（而且正好写满），就把它当作未命中，重新算这一块。见 `allocate()` 里的 `is_last_full_block`。
-3. **decode 生成的 token 也会被登记**。块在 decode 中被写满时（`may_append`），也计算哈希登记。所以多轮对话的下一轮，连上一轮模型的回答都能命中缓存。
-4. **同一个 batch 内也能共享**。两个开头相同的请求同时 prefill：第一个请求分配块并登记哈希，第二个立刻命中。这能成立是因为每一层注意力都是先把整个 batch 的 K/V 写进缓存（`store_kv`），再计算注意力，所以第二个请求读的时候，数据已经写好了。
-5. **命中后注意力怎么算**：命中部分不再计算，只算剩下的新 token（query 少于 key）。因果掩码要"右下对齐"：第 j 个新 token 的绝对位置是 `已缓存长度 + j`，它能看到 0 到这个位置的所有 key。见 `attention.py` 的 `_prefill_attention`。
+2. **至少要算最后一个 token**。如果整个 prompt 都命中缓存，我们就没有 logits 去采样第一个新 token 了。本项目的处理：查缓存时只看前 `(prompt 长度 - 1) // block_size` 个块，保证最后一个 token 一定会被重新计算。见 `get_cached_prefix()`。
+3. **decode 生成的 token 也会被登记**。块在 decode 中被写满时（`allocate_slots`），也计算哈希登记。所以多轮对话的下一轮，连上一轮模型的回答都能命中缓存。
+4. **同一个 batch 内也能共享**。两个开头相同的请求同时 prefill：第一个请求分配块并登记哈希（`allocate_slots` 在调度时就登记"这一步会被写满"的块），第二个立刻命中。这能成立是因为每一层注意力都是先把整个 batch 的 K/V 写进缓存（`store_kv`），再计算注意力，所以第二个请求读的时候，数据已经写好了。
+5. **命中后注意力怎么算**：命中部分不再计算，只算剩下的新 token（query 少于 key）。因果掩码要"右下对齐"：第 j 个新 token 的绝对位置是 `已缓存长度 + j`，它能看到 0 到这个位置的所有 key。PyTorch 后端见 `attention.py` 的 `_prefill_attention`；Triton 后端的 varlen prefill kernel 直接用绝对位置做因果掩码。
+6. **分块预填充时，只有算完的块才能被命中**。一个长 prompt 分好几步算，第 2 块之后的块在被真正计算之前不会登记哈希，所以别的请求不可能读到还没写进去的 K/V（`test_prefix_cache.py` 里有专门的测试）。
 
 ## 7. 正确性和效果
 

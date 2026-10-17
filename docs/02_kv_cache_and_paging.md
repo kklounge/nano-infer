@@ -80,21 +80,25 @@ slot = block_table[p // block_size] * block_size + p % block_size
 1. **写（store_kv）**：把这一步新 token 的 K、V 写进它们的槽位：`k_cache.view(-1, H, D).index_copy_(0, slot_mapping, k)`
 2. **读（gather）+ 计算**：按块表把这个序列所有 token 的 K、V 从各个块里"捡"回来，拼成连续张量，再算注意力。
 
-真正的 vLLM 用自己写的 CUDA kernel 直接在块上算注意力，不需要先"捡"成连续的；本项目为了**可读**和**能在 CPU 上跑**，用 PyTorch 的 `index_select` 先 gather 再调用 `torch.nn.functional.scaled_dot_product_attention`（SDPA）。这是一个有意识的取舍，面试时可以主动说出来。
+本项目有两种实现，用 `attn_backend` 切换：
+- **`triton`（GPU 默认）**：自己写的 Triton kernel **直接在块上算注意力**，按块表一块一块读 K/V，不需要先拼成连续张量（和 vLLM 的 PagedAttention 是同一个思路）。见 [05 篇](05_model_and_attention.md) 第 4 节。
+- **`sdpa`（CPU 默认）/ `naive`**：用 PyTorch 的 `index_select` 先按块表把 K/V gather 成连续张量，再调用 `torch.nn.functional.scaled_dot_product_attention`（SDPA）或教科书公式。好读、能在 CPU 上跑，但多了一次拷贝。测试保证三种后端结果一致。
 
 ### 4.4 Decode 时怎么批量读？
-batch 里每个序列长度不同。我们把每个序列的槽位号排成一个 `[B, 最长长度]` 的矩阵，短的用 0 填充，再用一个 **mask（掩码）** 把填充位置屏蔽掉，一次 `index_select` 读出所有序列的 K/V。这样 decode 不需要 Python 循环，完全向量化。
+batch 里每个序列长度不同。PyTorch 后端把每个序列的槽位号排成一个 `[B, 最长长度]` 的矩阵，短的用 0 填充，再用一个 **mask（掩码）** 把填充位置屏蔽掉，一次 `index_select` 读出所有序列的 K/V，完全向量化。Triton 后端不需要这个矩阵：kernel 的每个程序（program）负责一个序列的一个 KV 头，自己读块表、按真实长度循环。
 
 ### 4.5 块管理器（Block Manager）
-`nanoinfer/engine/block_manager.py`，主要方法：
+`nanoinfer/engine/block_manager.py`，主要方法（v0.2 起按"这一步要算几个 token"来分配，支持分块预填充）：
 
 | 方法 | 什么时候调用 | 做什么 |
 |---|---|---|
-| `can_allocate(seq)` | 新请求想进场 | 空闲块够不够装下整个 prompt |
-| `allocate(seq)` | prefill 之前 | 分配块（并顺便查前缀缓存） |
-| `can_append(seq)` | 每次 decode 之前 | 如果这一步的 token 正好落在新块的第一个位置，需要 1 个空块 |
-| `may_append(seq)` | 每次 decode 之前 | 需要时分配新块；某块刚写满时登记它的哈希 |
+| `get_cached_prefix(seq)` | 新请求想进场 | 查前缀缓存：开头有几个写满的块已经算过（只查，不改任何状态） |
+| `allocate_prefix(seq, ids)` | 新请求进场 | 共享这些命中的块（引用计数 +1，或从空闲队列"复活"） |
+| `can_allocate_slots(seq, n)` | 每一步调度时 | 这一步要再算 n 个 token，空闲块够不够 |
+| `allocate_slots(seq, n)` | 每一步调度时 | 按需分配新块；这一步会被写满的块，立刻算哈希登记 |
 | `deallocate(seq)` | 请求结束 / 被抢占 | 引用计数减一，归零的块回到空闲队列 |
+
+decode 就是 n = 1 的特例：只有当新 token 正好落在新块的第一个位置时，才需要 1 个空块。
 
 空闲块用 `OrderedDict` 按"最近释放"排序（**LRU，least recently used**），最久没用的先被覆盖。这个顺序对前缀缓存很重要，下一篇讲。
 
