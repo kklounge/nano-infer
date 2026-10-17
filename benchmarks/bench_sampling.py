@@ -34,7 +34,7 @@ Numbers are printed as two Markdown tables (the whole decode step, then the samp
 and saved to benchmarks/results/<device>-sampling-<model size>-b<batch>.json.
 
 Why the old arm comes from a commit and not from HEAD: the candidate-window rewrite is *committed*
-(`78dfa3e`), so `git show HEAD:nanoinfer/engine/sampler.py` hands back the NEW sampler and the A/B
+(`fbfcde5`), so `git show HEAD:nanoinfer/engine/sampler.py` hands back the NEW sampler and the A/B
 would silently compare the new sampler with itself. The last commit that still has the old
 implementation is `4aaf1f1`, which this script extracts by default -- no manual setup needed. The
 check is `grep -c _candidate_window`: 0 means it really is the old one (5 at HEAD). Only the sampler
@@ -63,7 +63,7 @@ import torch  # noqa: E402
 
 from nanoinfer import LLM, SamplingParams  # noqa: E402
 
-# The last commit before the candidate-window rewrite (78dfa3e). See the module docstring.
+# The last commit before the candidate-window rewrite (fbfcde5). See the module docstring.
 OLD_SAMPLER_REV = "4aaf1f1"
 SAMPLER_PATH_IN_REPO = "nanoinfer/engine/sampler.py"
 
@@ -359,7 +359,7 @@ def main():
     ap.add_argument("--old-sampler", default=None,
                     help=f"path to a pre-rewrite sampler.py; default: extracted from {OLD_SAMPLER_REV}")
     ap.add_argument("--old-sampler-rev", default=OLD_SAMPLER_REV,
-                    help="commit to take the old arm from (must predate the rewrite in 78dfa3e)")
+                    help="commit to take the old arm from (must predate the rewrite in fbfcde5)")
     ap.add_argument("--no-old", action="store_true", help="measure the current sampler only, no A/B")
     ap.add_argument("--attn-backend", default="auto", choices=["auto", "triton", "sdpa", "naive"])
     ap.add_argument("--enforce-eager", action="store_true", help="disable CUDA graphs")

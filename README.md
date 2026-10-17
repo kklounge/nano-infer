@@ -289,7 +289,7 @@ python benchmarks/bench_sampling.py --model models/Qwen2.5-0.5B-Instruct --batch
 
 第 5 节的采样对比来自单独的 `benchmarks/bench_sampling.py`——上面那几个脚本都写死了 `temperature=0`，根本不碰采样路径。它在一个进程里加载一次模型，然后把 `runner.sampler` 在改写前的实现和当前实现之间来回替换：batch 64、prompt 128 token，每个采样配置先跑 15 步预热再计时 60 步取中位数，**两个实现每轮各测一遍、交替进行，共 5 轮，取最好的一轮**——这样后台负载在几分钟里的漂移会同等地落在两边。表里三个 batch 分别是 `--batch 1` / `16` / `64`。
 
-旧实现默认由脚本自己从 git 里取（`git show 4aaf1f1:nanoinfer/engine/sampler.py`，构造参数和现在相同，可以直接换上去），不用手工准备；取不到那个 commit（浅克隆、源码压缩包、没装 git）时只测当前实现。注意**改写本身就是一个 commit（`78dfa3e`），所以 `git show HEAD:...` 拿到的是新实现**，那样等于拿新实现和自己比——`grep -c _candidate_window` 是 0 才是旧的（`HEAD` 上是 5）。另外绝对毫秒数会随后台 CPU 负载一起浮动，要看的是改写前后的比例，不是绝对值。
+旧实现默认由脚本自己从 git 里取（`git show 4aaf1f1:nanoinfer/engine/sampler.py`，构造参数和现在相同，可以直接换上去），不用手工准备；取不到那个 commit（浅克隆、源码压缩包、没装 git）时只测当前实现。注意**改写本身就是一个 commit（`fbfcde5`），所以 `git show HEAD:...` 拿到的是新实现**，那样等于拿新实现和自己比——`grep -c _candidate_window` 是 0 才是旧的（`HEAD` 上是 5）。另外绝对毫秒数会随后台 CPU 负载一起浮动，要看的是改写前后的比例，不是绝对值。
 
 ---
 

@@ -69,7 +69,7 @@ python benchmarks/bench_throughput.py --model models/Qwen2.5-0.5B-Instruct
 python benchmarks/bench_sampling.py --model models/Qwen2.5-0.5B-Instruct --batch 64
 ```
 
-它在一个进程里加载一次模型，用六种采样配置（贪心作对照、`top_p` 配不配 `top_k`、加 `repetition_penalty`、只用 `min_p`、整批贪心加一个采样请求）各测一步 decode 的耗时，并且把 `runner.sampler` 在**改写前的实现**（默认自己从 `git show 4aaf1f1:nanoinfer/engine/sampler.py` 取，取不到就只测当前实现）和当前实现之间交替替换，两个实现每轮各测一遍、共 5 轮，取最好的一轮。两件要留意的事：一是改写本身是 commit `78dfa3e`，所以 `HEAD` 上的 `sampler.py` 已经是新实现，旧的那一边必须从 `4aaf1f1` 取（`grep -c _candidate_window` 为 0 才对）；二是只有采样器在两边不同，模型、KV 缓存、CUDA Graph、调度器都是共享的，而 CUDA Graph 只盖住模型前向、采样在图外面，所以热替换是安全的。
+它在一个进程里加载一次模型，用六种采样配置（贪心作对照、`top_p` 配不配 `top_k`、加 `repetition_penalty`、只用 `min_p`、整批贪心加一个采样请求）各测一步 decode 的耗时，并且把 `runner.sampler` 在**改写前的实现**（默认自己从 `git show 4aaf1f1:nanoinfer/engine/sampler.py` 取，取不到就只测当前实现）和当前实现之间交替替换，两个实现每轮各测一遍、共 5 轮，取最好的一轮。两件要留意的事：一是改写本身是 commit `fbfcde5`，所以 `HEAD` 上的 `sampler.py` 已经是新实现，旧的那一边必须从 `4aaf1f1` 取（`grep -c _candidate_window` 为 0 才对）；二是只有采样器在两边不同，模型、KV 缓存、CUDA Graph、调度器都是共享的，而 CUDA Graph 只盖住模型前向、采样在图外面，所以热替换是安全的。
 
 ## 3. 性能：在线服务（`benchmarks/bench_serving.py`）
 
