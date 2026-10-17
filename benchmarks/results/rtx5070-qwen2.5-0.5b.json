@@ -1,0 +1,157 @@
+{
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "torch": "2.11.0+cu128",
+    "cpu_count": 12,
+    "torch_threads": 6,
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "gpu": "NVIDIA GeForce RTX 5070"
+  },
+  "config": {
+    "model": "models\\Qwen2.5-0.5B-Instruct",
+    "device": "auto",
+    "dtype": "auto",
+    "batch_sizes": [
+      1,
+      4,
+      16
+    ],
+    "input_len": 128,
+    "output_len": 128,
+    "repeats": 3,
+    "mixed_hf_batch": 16,
+    "scenarios": [
+      "static",
+      "mixed",
+      "prefix"
+    ],
+    "engines": [
+      "hf",
+      "nano"
+    ],
+    "cuda_graph": false,
+    "enforce_eager": false,
+    "attn_backend": "auto",
+    "no_chunked_prefill": false,
+    "max_num_batched_tokens": null,
+    "no_prefix": false,
+    "threads": null,
+    "out": "benchmarks\\results\\rtx5070-qwen2.5-0.5b.json"
+  },
+  "engines": {
+    "hf": {
+      "engine": "hf-generate",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 2.236753899996984,
+          "tok_per_s": 57.22578599289471,
+          "ttft_s": 0.020951899990905076,
+          "all_seconds": [
+            2.236753899996984,
+            2.2277637000079267,
+            2.2428169999911916
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 2.3270418999891263,
+          "tok_per_s": 220.02182255609256,
+          "ttft_s": 0.02274030000262428,
+          "all_seconds": [
+            2.3270418999891263,
+            2.315660399995977,
+            2.5579109999962384
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 2.3337732999934815,
+          "tok_per_s": 877.5488176189693,
+          "ttft_s": 0.044831100007286295,
+          "all_seconds": [
+            2.5424346000072546,
+            2.3337732999934815,
+            2.3124933000071906
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 8.547642999998061,
+        "tok_per_s": 409.23562203063386,
+        "mean_latency_s": 6.502222499999334,
+        "hf_batch_size": 16
+      }
+    },
+    "nano": {
+      "engine": "nano-infer",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "attn_backend": "triton",
+      "cuda_graphs": 9,
+      "cuda_graph_capture_s": 0.09,
+      "chunked_prefill": true,
+      "max_num_batched_tokens": 2048,
+      "kv_blocks": 8192,
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 0.3769724000012502,
+          "tok_per_s": 339.5474045303462,
+          "ttft_s": 0.005563699989579618,
+          "all_seconds": [
+            0.3769724000012502,
+            0.3779783000063617,
+            0.3761871000024257
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 0.32585380000818986,
+          "tok_per_s": 1571.2568028580044,
+          "ttft_s": 0.010299750007106923,
+          "all_seconds": [
+            0.3260650000011083,
+            0.32585380000818986,
+            0.3256165000057081
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 0.36471229999733623,
+          "tok_per_s": 5615.385058345874,
+          "ttft_s": 0.02977914999337372,
+          "all_seconds": [
+            0.36471229999733623,
+            0.365147500007879,
+            0.3642842999979621
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 0.7512421999999788,
+        "tok_per_s": 4656.287945485622,
+        "mean_latency_s": 0.37099659999967116
+      },
+      "prefix": {
+        "without_prefix_cache": {
+          "seconds": 0.24746379999851342,
+          "prefill_tokens_computed": 8704,
+          "mean_ttft_s": 0.0924021562532289
+        },
+        "with_prefix_cache": {
+          "seconds": 0.10642799999914132,
+          "prefill_tokens_computed": 512,
+          "mean_ttft_s": 0.012183893743895169
+        }
+      }
+    }
+  }
+}

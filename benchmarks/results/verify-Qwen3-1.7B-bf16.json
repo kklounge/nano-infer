@@ -1,0 +1,22 @@
+{
+  "model": "Qwen3-1.7B",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "7/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9869791666666666,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9921875,
+  "sanity_2_plus_3": "<think>\nOkay, the user is asking"
+}

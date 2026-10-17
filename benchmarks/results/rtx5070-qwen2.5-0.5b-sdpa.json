@@ -1,0 +1,96 @@
+{
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "torch": "2.11.0+cu128",
+    "cpu_count": 12,
+    "torch_threads": 6,
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "gpu": "NVIDIA GeForce RTX 5070"
+  },
+  "config": {
+    "model": "models\\Qwen2.5-0.5B-Instruct",
+    "device": "auto",
+    "dtype": "auto",
+    "batch_sizes": [
+      1,
+      4,
+      16
+    ],
+    "input_len": 128,
+    "output_len": 128,
+    "repeats": 3,
+    "mixed_hf_batch": 16,
+    "scenarios": [
+      "static",
+      "mixed"
+    ],
+    "engines": [
+      "nano"
+    ],
+    "cuda_graph": false,
+    "enforce_eager": false,
+    "attn_backend": "sdpa",
+    "no_chunked_prefill": false,
+    "max_num_batched_tokens": null,
+    "no_prefix": false,
+    "threads": null,
+    "out": "benchmarks\\results\\rtx5070-qwen2.5-0.5b-sdpa.json"
+  },
+  "engines": {
+    "nano": {
+      "engine": "nano-infer",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "attn_backend": "sdpa",
+      "cuda_graphs": 36,
+      "cuda_graph_capture_s": 0.97,
+      "chunked_prefill": true,
+      "max_num_batched_tokens": 2048,
+      "kv_blocks": 8192,
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 0.5241655999998329,
+          "tok_per_s": 244.19763525122747,
+          "ttft_s": 0.01953740000317339,
+          "all_seconds": [
+            0.5241655999998329,
+            0.5285987999959616,
+            0.5231729000079213
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 0.5134189999953378,
+          "tok_per_s": 997.2361755304134,
+          "ttft_s": 0.03791914999965229,
+          "all_seconds": [
+            0.5133637999970233,
+            0.5134189999953378,
+            0.5169585999974515
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 0.6262955999991391,
+          "tok_per_s": 3270.0213764918917,
+          "ttft_s": 0.11663773750206019,
+          "all_seconds": [
+            0.627670500005479,
+            0.6262955999991391,
+            0.621380800002953
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 1.2956993999978295,
+        "tok_per_s": 2699.7002545543046,
+        "mean_latency_s": 0.7179460718739392
+      },
+      "prefix": null
+    }
+  }
+}

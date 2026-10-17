@@ -1,0 +1,400 @@
+
+######## nvidia-smi  15:36:55
+name, memory.used [MiB], memory.total [MiB], utilization.gpu [%]
+NVIDIA GeForce RTX 5070, 2061 MiB, 12227 MiB, 0 %
+pid, process_name, used_gpu_memory [MiB]
+
+######## pytest  15:36:55
+........................................................................ [ 48%]
+........................................................................ [ 97%]
+...                                                                      [100%]
+147 passed in 71.49s (0:01:11)
+
+######## bench 0.5B full (hf + nano)  15:38:10
+[hf] static B=1: 57.7 tok/s
+[hf] static B=4: 221.8 tok/s
+[hf] static B=16: 879.9 tok/s
+[hf] mixed: 407.2 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.09, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 341.6 tok/s
+[nano] static B=4: 1556.1 tok/s
+[nano] static B=16: 5573.7 tok/s
+[nano] mixed: 4621.9 tok/s
+[nano] prefix cache=False: 0.25s
+[nano] prefix cache=True: 0.11s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 57.7 | 341.6 | 5.92x | 2.22 | 0.37 | 0.022 | 0.006 |
+| 4 | 221.8 | 1556.1 | 7.01x | 2.31 | 0.33 | 0.023 | 0.011 |
+| 16 | 879.9 | 5573.7 | 6.33x | 2.33 | 0.37 | 0.045 | 0.030 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 407.2 | 8.59 | 6.53 |
+| nano-infer, continuous batching | 4621.9 | 0.76 | 0.38 |
+
+Shared 512-token system prompt, 16 requests (32 own tokens + 32 output tokens each):
+
+| prefix caching | total time (s) | prefill tokens computed | mean TTFT (s) |
+|---|---|---|---|
+| off | 0.25 | 8704 | 0.095 |
+| on | 0.11 | 512 | 0.012 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-0.5b.json
+
+######## ablation 0.5B nano --enforce-eager  15:38:59
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 0, 'cuda_graph_capture_s': 0.0, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 207.8 tok/s
+[nano] static B=4: 789.1 tok/s
+[nano] static B=16: 3023.7 tok/s
+[nano] mixed: 2656.3 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | - | 207.8 | - | - | 0.62 | - | 0.005 |
+| 4 | - | 789.1 | - | - | 0.65 | - | 0.010 |
+| 16 | - | 3023.7 | - | - | 0.68 | - | 0.030 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| nano-infer, continuous batching | 2656.3 | 1.32 | 0.62 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-0.5b-eager.json
+
+######## ablation 0.5B nano --attn-backend sdpa  15:39:13
+[nano] {'attn_backend': 'sdpa', 'cuda_graphs': 36, 'cuda_graph_capture_s': 0.97, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 244.2 tok/s
+[nano] static B=4: 997.2 tok/s
+[nano] static B=16: 3270.0 tok/s
+[nano] mixed: 2699.7 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | - | 244.2 | - | - | 0.52 | - | 0.020 |
+| 4 | - | 997.2 | - | - | 0.51 | - | 0.038 |
+| 16 | - | 3270.0 | - | - | 0.63 | - | 0.117 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| nano-infer, continuous batching | 2699.7 | 1.30 | 0.72 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-0.5b-sdpa.json
+
+######## verify Qwen2.5-0.5B-Instruct bf16  15:39:28
+powershell : python.exe : W1017 15:39:31.969000 4820 .venv\Lib\site-packages\torch\distributed\elastic\multiprocessing\
+ 
+ 
+{
+  "model": "Qwen2.5-0.5B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "2/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    15,
+    48,
+    45,
+    47,
+    31,
+    36,
+    10
+  ],
+  "teacher_forced_top1_agreement": 0.9817708333333334,
+  "positions_checked": 384
+}
+sanity: '5'
+
+######## verify Qwen2.5-1.5B-Instruct bf16  15:39:41
+ 
+{
+  "model": "Qwen2.5-1.5B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "5/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    17,
+    48,
+    5,
+    23,
+    48,
+    48
+  ],
+  "teacher_forced_top1_agreement": 0.9921875,
+  "positions_checked": 384
+}
+sanity: '5'
+
+######## verify Qwen3-1.7B bf16  15:40:01
+ 
+{
+  "model": "Qwen3-1.7B",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "7/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9869791666666666,
+  "positions_checked": 384
+}
+sanity: '<think>\nOkay, the user is asking'
+
+######## verify Qwen2.5-3B-Instruct bf16  15:40:24
+ 
+{
+  "model": "Qwen2.5-3B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "4/8",
+  "greedy_matching_prefix_tokens": [
+    37,
+    10,
+    1,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9817708333333334,
+  "positions_checked": 384
+}
+sanity: '5'
+
+######## verify Qwen2.5-0.5B-Instruct fp32  15:40:51
+ 
+{
+  "model": "Qwen2.5-0.5B-Instruct",
+  "dtype": "float32",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "8/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48
+  ],
+  "teacher_forced_top1_agreement": 1.0,
+  "positions_checked": 384
+}
+sanity: '5'
+
+######## verify Qwen2.5-1.5B-Instruct fp32  15:41:11
+ 
+{
+  "model": "Qwen2.5-1.5B-Instruct",
+  "dtype": "float32",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "8/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48
+  ],
+  "teacher_forced_top1_agreement": 1.0,
+  "positions_checked": 384
+}
+sanity: '5'
+
+######## verify Qwen3-1.7B fp32  15:41:37
+ 
+{
+  "model": "Qwen3-1.7B",
+  "dtype": "float32",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "8/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48
+  ],
+  "teacher_forced_top1_agreement": 1.0,
+  "positions_checked": 384
+}
+sanity: '<think>\nOkay, the user is asking'
+
+######## bench Qwen2.5-1.5B-Instruct  15:42:08
+[hf] static B=1: 50.1 tok/s
+[hf] static B=4: 192.5 tok/s
+[hf] static B=16: 708.6 tok/s
+[hf] mixed: 319.4 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.48, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 130.5 tok/s
+[nano] static B=4: 613.8 tok/s
+[nano] static B=16: 2208.8 tok/s
+[nano] mixed: 1401.5 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 2 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 50.1 | 130.5 | 2.61x | 2.56 | 0.98 | 0.045 | 0.195 |
+| 4 | 192.5 | 613.8 | 3.19x | 2.66 | 0.83 | 0.039 | 0.025 |
+| 16 | 708.6 | 2208.8 | 3.12x | 2.89 | 0.93 | 0.116 | 0.092 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 319.4 | 10.95 | 8.36 |
+| nano-infer, continuous batching | 1401.5 | 2.50 | 1.56 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-1.5b-instruct.json
+
+######## bench Qwen3-1.7B  15:42:59
+[hf] static B=1: 38.1 tok/s
+[hf] static B=4: 158.7 tok/s
+[hf] static B=16: 582.1 tok/s
+[hf] mixed: 246.5 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.37, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 2999}
+[nano] static B=1: 150.9 tok/s
+[nano] static B=4: 545.5 tok/s
+[nano] static B=16: 1872.1 tok/s
+[nano] mixed: 1224.0 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 2 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 38.1 | 150.9 | 3.96x | 3.36 | 0.85 | 0.040 | 0.023 |
+| 4 | 158.7 | 545.5 | 3.44x | 3.23 | 0.94 | 0.047 | 0.030 |
+| 16 | 582.1 | 1872.1 | 3.22x | 3.52 | 1.09 | 0.138 | 0.103 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 246.5 | 14.19 | 10.84 |
+| nano-infer, continuous batching | 1224.0 | 2.86 | 1.80 |
+
+saved to benchmarks\results\rtx5070-qwen3-1.7b.json
+
+######## bench Qwen2.5-3B-Instruct  15:43:59
+[hf] static B=1: 37.7 tok/s
+[hf] static B=4: 138.6 tok/s
+[hf] static B=16: 502.0 tok/s
+[hf] mixed: 216.3 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.44, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 4630}
+[nano] static B=1: 78.7 tok/s
+[nano] static B=4: 333.5 tok/s
+[nano] static B=16: 1172.2 tok/s
+[nano] mixed: 854.6 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 2 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 37.7 | 78.7 | 2.09x | 3.40 | 1.63 | 0.043 | 0.202 |
+| 4 | 138.6 | 333.5 | 2.41x | 3.69 | 1.54 | 0.071 | 0.052 |
+| 16 | 502.0 | 1172.2 | 2.34x | 4.08 | 1.75 | 0.235 | 0.188 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 216.3 | 16.17 | 12.36 |
+| nano-infer, continuous batching | 854.6 | 4.09 | 2.40 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-3b-instruct.json
+
+######## serving: chunked vs unchunked prefill, long prompts  15:45:12
+
+=== default ===
+completed 200  failed 0  in 22.9s | 8.75 req/s | output 1655 tok/s | total 14731 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 51.6 | 38.4 | 73.4 | 281.8 |
+| TPOT | 5.9 | 5.3 | 9.0 | 10.5 |
+| ITL | 6.0 | 4.3 | 6.2 | 35.6 |
+| E2E | 1174.9 | 1101.2 | 1739.7 | 2656.8 |
+
+=== --no-chunked-prefill ===
+completed 200  failed 0  in 22.8s | 8.78 req/s | output 1661 tok/s | total 14780 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 43.2 | 37.6 | 64.3 | 143.8 |
+| TPOT | 5.6 | 5.2 | 8.6 | 9.7 |
+| ITL | 5.7 | 4.2 | 5.9 | 35.8 |
+| E2E | 1108.7 | 1036.7 | 1631.2 | 2273.0 |
+
+saved to benchmarks\results\rtx5070-serving-chunked-vs-not.json
+
+######## serving: shared system prompt (prefix cache)  15:46:13
+
+=== default ===
+completed 200  failed 0  in 10.7s | 18.62 req/s | output 1770 tok/s | total 30475 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 30.7 | 27.5 | 44.5 | 60.0 |
+| TPOT | 6.1 | 5.8 | 9.3 | 10.8 |
+| ITL | 6.1 | 4.3 | 7.4 | 35.2 |
+| E2E | 603.5 | 570.9 | 851.8 | 1115.3 |
+
+=== --no-prefix-caching ===
+completed 200  failed 0  in 11.2s | 17.78 req/s | output 1691 tok/s | total 29113 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 62.1 | 43.1 | 119.5 | 166.5 |
+| TPOT | 10.0 | 9.3 | 16.4 | 20.1 |
+| ITL | 9.9 | 5.2 | 33.0 | 39.2 |
+| E2E | 992.6 | 889.6 | 1660.0 | 2047.8 |
+
+saved to benchmarks\results\rtx5070-serving-prefix.json
+
+######## done  15:46:47

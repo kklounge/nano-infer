@@ -1,0 +1,145 @@
+{
+  "hardware": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python": "3.12.10",
+    "torch": "2.11.0+cu128",
+    "cpu_count": 12,
+    "torch_threads": 6,
+    "cpu": "AMD64 Family 26 Model 68 Stepping 0, AuthenticAMD",
+    "gpu": "NVIDIA GeForce RTX 5070"
+  },
+  "config": {
+    "model": "models\\Qwen2.5-3B-Instruct",
+    "device": "auto",
+    "dtype": "auto",
+    "batch_sizes": [
+      1,
+      4,
+      16
+    ],
+    "input_len": 128,
+    "output_len": 128,
+    "repeats": 3,
+    "mixed_hf_batch": 16,
+    "scenarios": [
+      "static",
+      "mixed"
+    ],
+    "engines": [
+      "hf",
+      "nano"
+    ],
+    "cuda_graph": false,
+    "enforce_eager": false,
+    "attn_backend": "auto",
+    "no_chunked_prefill": false,
+    "max_num_batched_tokens": null,
+    "no_prefix": false,
+    "threads": null,
+    "out": "benchmarks\\results\\rtx5070-qwen2.5-3b-instruct.json"
+  },
+  "engines": {
+    "hf": {
+      "engine": "hf-generate",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 3.454717000000528,
+          "tok_per_s": 37.050791714626826,
+          "ttft_s": 0.03639890000340529,
+          "all_seconds": [
+            3.454717000000528,
+            3.881695399992168,
+            3.4338002000004053
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 3.7057078999932855,
+          "tok_per_s": 138.16523423255452,
+          "ttft_s": 0.0703230000071926,
+          "all_seconds": [
+            3.7125706000078935,
+            3.7057078999932855,
+            3.698949099998572
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 4.084396499994909,
+          "tok_per_s": 501.4204668921229,
+          "ttft_s": 0.2331114999979036,
+          "all_seconds": [
+            4.092860200005816,
+            4.080010899997433,
+            4.084396499994909
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 16.15373270001146,
+        "tok_per_s": 216.54437800605172,
+        "mean_latency_s": 12.325561900011962,
+        "hf_batch_size": 16
+      }
+    },
+    "nano": {
+      "engine": "nano-infer",
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "attn_backend": "triton",
+      "cuda_graphs": 9,
+      "cuda_graph_capture_s": 0.21,
+      "chunked_prefill": true,
+      "max_num_batched_tokens": 2048,
+      "kv_blocks": 4630,
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 1.4414539999997942,
+          "tok_per_s": 88.79922633675322,
+          "ttft_s": 0.015998300004866906,
+          "all_seconds": [
+            1.4414539999997942,
+            1.4285197999997763,
+            1.4435460999957286
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 1.5308182000007946,
+          "tok_per_s": 334.4616623970986,
+          "ttft_s": 0.051835375001246575,
+          "all_seconds": [
+            1.5417725000006612,
+            1.5302173000090988,
+            1.5308182000007946
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 1.7471100999973714,
+          "tok_per_s": 1172.2214873596583,
+          "ttft_s": 0.18770264375234547,
+          "all_seconds": [
+            1.7471100999973714,
+            1.7452917999908095,
+            1.7476405999914277
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 3.5101103000051808,
+        "tok_per_s": 996.5498804965864,
+        "mean_latency_s": 1.8220972906251518
+      },
+      "prefix": null
+    }
+  }
+}

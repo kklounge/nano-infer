@@ -1,0 +1,291 @@
+
+######## nvidia-smi  15:51:32
+name, memory.used [MiB], memory.total [MiB], utilization.gpu [%]
+NVIDIA GeForce RTX 5070, 1961 MiB, 12227 MiB, 0 %
+
+######## pytest  15:51:32
+........................................................................ [ 48%]
+........................................................................ [ 97%]
+...                                                                      [100%]
+147 passed in 65.53s (0:01:05)
+
+######## bench 0.5B full (hf + nano)  15:52:40
+[hf] static B=1: 57.2 tok/s
+[hf] static B=4: 220.0 tok/s
+[hf] static B=16: 877.5 tok/s
+[hf] mixed: 409.2 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.09, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 339.5 tok/s
+[nano] static B=4: 1571.3 tok/s
+[nano] static B=16: 5615.4 tok/s
+[nano] mixed: 4656.3 tok/s
+[nano] prefix cache=False: 0.25s
+[nano] prefix cache=True: 0.11s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 57.2 | 339.5 | 5.93x | 2.24 | 0.38 | 0.021 | 0.006 |
+| 4 | 220.0 | 1571.3 | 7.14x | 2.33 | 0.33 | 0.023 | 0.010 |
+| 16 | 877.5 | 5615.4 | 6.40x | 2.33 | 0.36 | 0.045 | 0.030 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 409.2 | 8.55 | 6.50 |
+| nano-infer, continuous batching | 4656.3 | 0.75 | 0.37 |
+
+Shared 512-token system prompt, 16 requests (32 own tokens + 32 output tokens each):
+
+| prefix caching | total time (s) | prefill tokens computed | mean TTFT (s) |
+|---|---|---|---|
+| off | 0.25 | 8704 | 0.092 |
+| on | 0.11 | 512 | 0.012 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-0.5b.json
+
+######## bench Qwen2.5-1.5B-Instruct  15:53:30
+[hf] static B=1: 49.9 tok/s
+[hf] static B=4: 193.2 tok/s
+[hf] static B=16: 696.9 tok/s
+[hf] mixed: 320.0 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.15, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 8192}
+[nano] static B=1: 159.8 tok/s
+[nano] static B=4: 618.2 tok/s
+[nano] static B=16: 2204.6 tok/s
+[nano] mixed: 1829.2 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 49.9 | 159.8 | 3.20x | 2.57 | 0.80 | 0.027 | 0.010 |
+| 4 | 193.2 | 618.2 | 3.20x | 2.65 | 0.83 | 0.037 | 0.024 |
+| 16 | 696.9 | 2204.6 | 3.16x | 2.94 | 0.93 | 0.116 | 0.091 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 320.0 | 10.93 | 8.32 |
+| nano-infer, continuous batching | 1829.2 | 1.91 | 0.99 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-1.5b-instruct.json
+
+######## bench Qwen3-1.7B  15:54:31
+[hf] static B=1: 40.0 tok/s
+[hf] static B=4: 156.5 tok/s
+[hf] static B=16: 583.4 tok/s
+[hf] mixed: 245.2 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.15, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 2999}
+[nano] static B=1: 152.0 tok/s
+[nano] static B=4: 547.3 tok/s
+[nano] static B=16: 1882.5 tok/s
+[nano] mixed: 1596.8 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 40.0 | 152.0 | 3.80x | 3.20 | 0.84 | 0.030 | 0.016 |
+| 4 | 156.5 | 547.3 | 3.50x | 3.27 | 0.94 | 0.047 | 0.030 |
+| 16 | 583.4 | 1882.5 | 3.23x | 3.51 | 1.09 | 0.137 | 0.102 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 245.2 | 14.27 | 10.90 |
+| nano-infer, continuous batching | 1596.8 | 2.19 | 1.14 |
+
+saved to benchmarks\results\rtx5070-qwen3-1.7b.json
+
+######## bench Qwen2.5-3B-Instruct  15:55:45
+[hf] static B=1: 37.1 tok/s
+[hf] static B=4: 138.2 tok/s
+[hf] static B=16: 501.4 tok/s
+[hf] mixed: 216.5 tok/s
+[nano] {'attn_backend': 'triton', 'cuda_graphs': 9, 'cuda_graph_capture_s': 0.21, 'chunked_prefill': True, 'max_num_batched_tokens': 2048, 'kv_blocks': 4630}
+[nano] static B=1: 88.8 tok/s
+[nano] static B=4: 334.5 tok/s
+[nano] static B=16: 1172.2 tok/s
+[nano] mixed: 996.5 tok/s
+
+Hardware: NVIDIA GeForce RTX 5070 | Windows-11-10.0.26200-SP0 | torch 2.11.0+cu128 | threads 6
+dtype: bfloat16, input 128 tokens, output 128 tokens, median of 3 runs
+
+| batch | HF tok/s | nano tok/s | speed-up | HF batch time (s) | nano batch time (s) | HF TTFT (s) | nano TTFT (s) |
+|---|---|---|---|---|---|---|---|
+| 1 | 37.1 | 88.8 | 2.40x | 3.45 | 1.44 | 0.036 | 0.016 |
+| 4 | 138.2 | 334.5 | 2.42x | 3.71 | 1.53 | 0.070 | 0.052 |
+| 16 | 501.4 | 1172.2 | 2.34x | 4.08 | 1.75 | 0.233 | 0.188 |
+
+Mixed output lengths (32 requests, 16-256 new tokens each):
+
+| engine | useful tok/s | total time (s) | mean request latency (s) |
+|---|---|---|---|
+| HF generate, static batches of 16 | 216.5 | 16.15 | 12.33 |
+| nano-infer, continuous batching | 996.5 | 3.51 | 1.82 |
+
+saved to benchmarks\results\rtx5070-qwen2.5-3b-instruct.json
+
+######## verify Qwen2.5-0.5B-Instruct bf16 (with HF noise floor)  15:57:15
+{
+  "model": "Qwen2.5-0.5B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "2/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    15,
+    48,
+    45,
+    47,
+    31,
+    36,
+    10
+  ],
+  "teacher_forced_top1_agreement": 0.9817708333333334,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9661458333333334
+}
+sanity: '5'
+
+######## verify Qwen2.5-1.5B-Instruct bf16 (with HF noise floor)  15:57:29
+{
+  "model": "Qwen2.5-1.5B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "5/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    17,
+    48,
+    5,
+    23,
+    48,
+    48
+  ],
+  "teacher_forced_top1_agreement": 0.9921875,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9609375
+}
+sanity: '5'
+
+######## verify Qwen3-1.7B bf16 (with HF noise floor)  15:57:46
+{
+  "model": "Qwen3-1.7B",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "7/8",
+  "greedy_matching_prefix_tokens": [
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9869791666666666,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9921875
+}
+sanity: '<think>\nOkay, the user is asking'
+
+######## verify Qwen2.5-3B-Instruct bf16 (with HF noise floor)  15:58:07
+{
+  "model": "Qwen2.5-3B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "4/8",
+  "greedy_matching_prefix_tokens": [
+    37,
+    10,
+    1,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9817708333333334,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9921875
+}
+sanity: '5'
+
+######## serving 1.5B: long prompts, chunk budget 2048 / 512 / no chunking  15:58:32
+
+=== default ===
+completed 150  failed 0  in 55.3s | 2.71 req/s | output 389 tok/s | total 8205 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 250.8 | 218.0 | 439.1 | 579.8 |
+| TPOT | 18.2 | 16.1 | 28.1 | 44.6 |
+| ITL | 17.9 | 9.8 | 16.8 | 116.5 |
+| E2E | 2806.1 | 2525.6 | 4436.8 | 5762.0 |
+server: 3777 steps (259 mixed), decode-only step p50/p99/max 8.3/15.0/17.9 ms, steps with prefill p50/p99/max 104.0/388.0/474.9 ms, preemptions 0
+
+=== --max-num-batched-tokens 512 ===
+completed 150  failed 0  in 54.9s | 2.73 req/s | output 392 tok/s | total 8272 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 306.1 | 235.2 | 568.4 | 855.7 |
+| TPOT | 16.0 | 14.7 | 24.6 | 33.2 |
+| ITL | 15.9 | 10.2 | 34.0 | 37.9 |
+| E2E | 2575.9 | 2310.6 | 4094.9 | 4969.6 |
+server: 4184 steps (882 mixed), decode-only step p50/p99/max 8.1/12.8/14.2 ms, steps with prefill p50/p99/max 31.0/38.2/146.6 ms, preemptions 0
+
+=== --no-chunked-prefill ===
+completed 150  failed 0  in 55.5s | 2.70 req/s | output 388 tok/s | total 8186 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 228.3 | 192.0 | 398.4 | 594.4 |
+| TPOT | 18.8 | 16.8 | 32.0 | 48.7 |
+| ITL | 18.5 | 9.7 | 16.6 | 190.7 |
+| E2E | 2869.8 | 2523.5 | 4730.2 | 6108.0 |
+server: 3808 steps (149 mixed), decode-only step p50/p99/max 8.2/15.9/18.8 ms, steps with prefill p50/p99/max 155.0/226.8/454.2 ms, preemptions 0
+
+saved to benchmarks\results\rtx5070-serving-1.5b-chunked-prefill.json
+
+######## serving 0.5B: shared system prompt  16:01:46
+
+=== default ===
+completed 200  failed 0  in 10.8s | 18.47 req/s | output 1756 tok/s | total 30233 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 34.0 | 30.4 | 50.2 | 74.5 |
+| TPOT | 6.9 | 6.4 | 10.5 | 13.4 |
+| ITL | 6.9 | 4.7 | 14.7 | 38.1 |
+| E2E | 679.9 | 632.0 | 1033.3 | 1290.2 |
+server: 1825 steps (164 mixed), decode-only step p50/p99/max 3.7/6.3/7.4 ms, steps with prefill p50/p99/max 21.7/55.9/67.3 ms, preemptions 0
+
+=== --no-prefix-caching ===
+completed 200  failed 0  in 11.4s | 17.61 req/s | output 1674 tok/s | total 28823 tok/s
+| metric (ms) | mean | p50 | p90 | p99 |
+|---|---|---|---|---|
+| TTFT | 61.7 | 49.9 | 111.6 | 144.6 |
+| TPOT | 10.9 | 10.4 | 17.4 | 20.6 |
+| ITL | 10.9 | 5.6 | 34.2 | 42.0 |
+| E2E | 1084.5 | 979.5 | 1720.3 | 2098.4 |
+server: 1240 steps (192 mixed), decode-only step p50/p99/max 4.2/7.5/8.5 ms, steps with prefill p50/p99/max 33.1/48.2/64.4 ms, preemptions 0
+
+saved to benchmarks\results\rtx5070-serving-prefix.json
+
+######## done  16:02:23

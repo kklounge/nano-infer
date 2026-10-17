@@ -1,0 +1,22 @@
+{
+  "model": "Qwen2.5-3B-Instruct",
+  "dtype": "bfloat16",
+  "device": "cuda",
+  "attn_backend": "triton",
+  "cuda_graphs": 5,
+  "greedy_exact_matches": "4/8",
+  "greedy_matching_prefix_tokens": [
+    37,
+    10,
+    1,
+    48,
+    48,
+    48,
+    48,
+    24
+  ],
+  "teacher_forced_top1_agreement": 0.9817708333333334,
+  "positions_checked": 384,
+  "hf_eager_vs_hf_sdpa_top1_agreement": 0.9921875,
+  "sanity_2_plus_3": "5"
+}
