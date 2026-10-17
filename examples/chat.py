@@ -1,6 +1,7 @@
 """Interactive multi-turn chat in the terminal, printing tokens as they are generated.
 
     python examples/chat.py --model models/Qwen2.5-0.5B-Instruct
+    (a richer version with all engine options: python -m nanoinfer chat)
 
 Each new turn re-sends the whole conversation, so the prefix cache kicks in: watch the
 "reused N prompt tokens" line grow.
@@ -13,7 +14,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nanoinfer import LLM, SamplingParams  # noqa: E402
-from nanoinfer.server.api_server import IncrementalDetokenizer  # noqa: E402
 
 
 def main():
@@ -26,7 +26,8 @@ def main():
     llm = LLM(args.model, device=args.device, max_model_len=4096)
     print(f"nano-infer chat on {llm.device} ({llm.dtype}). Type 'exit' to quit.\n")
     history = [{"role": "system", "content": "You are a helpful assistant."}]
-    sp = SamplingParams(temperature=args.temperature, top_p=0.9, max_tokens=512)
+    # detokenize=True: the engine turns tokens into text incrementally (StepOutput.text)
+    sp = SamplingParams(temperature=args.temperature, top_p=0.9, max_tokens=512, detokenize=True)
     while True:
         try:
             user = input("you> ").strip()
@@ -38,17 +39,16 @@ def main():
             continue
         history.append({"role": "user", "content": user})
         rid = llm.add_request(llm.apply_chat_template(history), sp)
-        detok = IncrementalDetokenizer(llm.tokenizer)
         print("bot> ", end="", flush=True)
         done = False
         while not done:
             for out in llm.step():
                 if out.request_id == rid:
-                    print(detok.add(out.new_token_id), end="", flush=True)
+                    print(out.text, end="", flush=True)
                     done = out.finished
         result = llm.get_output(rid)
         print(f"\n   [reused {result.num_cached_tokens} prompt tokens from the prefix cache]\n")
-        history.append({"role": "assistant", "content": detok.text})
+        history.append({"role": "assistant", "content": result.text})
 
 
 if __name__ == "__main__":

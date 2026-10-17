@@ -1,5 +1,6 @@
 # Install PyTorch FIRST from https://pytorch.org (pick the CUDA build if you have an NVIDIA GPU), then:
 torch>=2.5
+triton-windows<3.7; platform_system == "Windows"   # GPU kernels (Linux torch wheels already include triton). Match your torch: 2.10/2.11 -> 3.6
 safetensors
 transformers>=4.56      # tokenizer + correctness reference only; the model itself is our own code
 huggingface_hub

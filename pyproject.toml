@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nano-infer"
-version = "0.1.0"
-description = "A tiny, readable LLM inference engine: paged KV cache, continuous batching, prefix caching."
+version = "0.2.0"
+description = "A small, readable, fast LLM inference engine: paged KV cache, continuous batching, chunked prefill, prefix caching, Triton kernels, CUDA graphs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = ["torch>=2.5", "safetensors", "transformers>=4.56", "huggingface_hub", "tqdm"]
 
+[project.scripts]
+nano-infer = "nanoinfer.__main__:main"
+
 [project.optional-dependencies]
+gpu = ["triton; platform_system == 'Linux'", "triton-windows; platform_system == 'Windows'"]
 server = ["fastapi", "uvicorn"]
 test = ["pytest", "httpx", "fastapi", "uvicorn"]
 
