@@ -44,13 +44,32 @@ def sync(device):
 
 
 # ----------------------------------------------------------------------------- nano-infer worker
+def make_llm(args, **overrides):
+    """nano-infer engine with the benchmark's command-line options."""
+    from nanoinfer import LLM
+    kw = dict(device=args.device, dtype=args.dtype, max_model_len=2048,
+              max_num_seqs=max(64, max(args.batch_sizes)), enable_prefix_caching=not args.no_prefix,
+              attn_backend=args.attn_backend, enforce_eager=args.enforce_eager,
+              enable_chunked_prefill=not args.no_chunked_prefill)
+    if args.max_num_batched_tokens:
+        kw["max_num_batched_tokens"] = args.max_num_batched_tokens
+    kw.update(overrides)
+    return LLM(args.model, **kw)
+
+
+def engine_info(llm) -> dict:
+    return {"attn_backend": llm.attn_backend, "cuda_graphs": len(llm.runner.graphs),
+            "cuda_graph_capture_s": round(llm.runner.graph_capture_seconds, 2),
+            "chunked_prefill": llm.config.enable_chunked_prefill,
+            "max_num_batched_tokens": llm.config.max_num_batched_tokens, "kv_blocks": llm.runner.num_blocks}
+
+
 def run_nano(args):
-    from nanoinfer import LLM, SamplingParams
-    llm = LLM(args.model, device=args.device, dtype=args.dtype, max_model_len=2048,
-              max_num_seqs=max(64, max(args.batch_sizes)), use_cuda_graph=args.cuda_graph,
-              enable_prefix_caching=not args.no_prefix)
+    from nanoinfer import SamplingParams
+    llm = make_llm(args)
     res = {"engine": "nano-infer", "device": str(llm.device), "dtype": str(llm.dtype).replace("torch.", ""),
-           "kv_blocks": llm.runner.num_blocks, "static": [], "mixed": None, "prefix": None}
+           **engine_info(llm), "static": [], "mixed": None, "prefix": None}
+    print(f"[nano] {engine_info(llm)}", flush=True)
     # warm-up (first calls allocate memory / pick kernels)
     llm.generate(make_prompts(2, 32, 99), SamplingParams(temperature=0, max_tokens=8, ignore_eos=True))
 
@@ -78,7 +97,6 @@ def run_nano(args):
         prompts = make_prompts(n, args.input_len, seed=7)
         lens = mixed_output_lens(n, seed=7)
         sps = [SamplingParams(temperature=0, max_tokens=m, ignore_eos=True) for m in lens]
-        llm.config.enable_prefix_caching = False
         sync(llm.device)
         t0 = time.perf_counter()
         outs = llm.generate(prompts, sps)
@@ -96,15 +114,14 @@ def run_nano(args):
 def bench_prefix(args):
     """Shared 512-token system prompt + 32 unique tokens, 32 output tokens, 16 requests."""
     import gc
-    from nanoinfer import LLM, SamplingParams
+    from nanoinfer import SamplingParams
     system = make_prompts(1, 512, seed=42)[0]
     questions = make_prompts(16, 32, seed=43)
     prompts = [system + q for q in questions]
     sp = SamplingParams(temperature=0, max_tokens=32, ignore_eos=True)
     out = {}
     for enabled in (False, True):
-        llm = LLM(args.model, device=args.device, dtype=args.dtype, max_model_len=2048, max_num_seqs=64,
-                  enable_prefix_caching=enabled)
+        llm = make_llm(args, enable_prefix_caching=enabled)
         llm.generate([system + [5]], SamplingParams(temperature=0, max_tokens=1))   # warm-up (+ fills the cache)
         before = llm.stats.prefill_tokens_computed
         sync(llm.device)
@@ -208,7 +225,11 @@ def main():
     ap.add_argument("--mixed-hf-batch", type=int, default=16)
     ap.add_argument("--scenarios", nargs="+", default=["static", "mixed", "prefix"])
     ap.add_argument("--engines", nargs="+", default=["hf", "nano"])
-    ap.add_argument("--cuda-graph", action="store_true")
+    ap.add_argument("--cuda-graph", action="store_true", help="(kept for old commands; CUDA graphs are on by default)")
+    ap.add_argument("--enforce-eager", action="store_true", help="disable CUDA graphs")
+    ap.add_argument("--attn-backend", default="auto", choices=["auto", "triton", "sdpa", "naive"])
+    ap.add_argument("--no-chunked-prefill", action="store_true")
+    ap.add_argument("--max-num-batched-tokens", type=int, default=None)
     ap.add_argument("--no-prefix", action="store_true", help="disable prefix caching in the static/mixed runs")
     ap.add_argument("--threads", type=int, default=None,
                     help="CPU threads for PyTorch (default: all cores). On a busy machine, fewer threads than "
