@@ -27,6 +27,7 @@ import random
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,10 +110,19 @@ async def run_load(args, url):
                 await asyncio.sleep(rng.expovariate(args.request_rate))
         results = await asyncio.gather(*tasks)
         duration = time.perf_counter() - t_start
-    return results, duration
+        # server-side view: how long engine steps took (decode-only vs steps containing prefill)
+        steps = {}
+        try:
+            for line in (await client.get(url + "/metrics")).text.splitlines():
+                name, _, value = line.partition(" ")
+                if "_step_ms_" in name or name.endswith(("_preemptions", "_mixed_steps", "_steps")):
+                    steps[name.removeprefix("nanoinfer_")] = float(value)
+        except Exception:      # noqa: BLE001  (not a nano-infer server)
+            pass
+    return results, duration, steps
 
 
-def summarize(results, duration):
+def summarize(results, duration, steps=None):
     ok = [r for r in results if "error" not in r]
     errors = [r["error"] for r in results if "error" in r]
     out_tok = sum(r["output_tokens"] for r in ok)
@@ -126,6 +136,8 @@ def summarize(results, duration):
     itl = [x * 1000 for r in ok for x in r["itl"]]
     s["itl_ms"] = {"mean": statistics.mean(itl) if itl else float("nan"), "p50": percentile(itl, 50),
                    "p90": percentile(itl, 90), "p99": percentile(itl, 99), "max": max(itl) if itl else float("nan")}
+    if steps:
+        s["server_steps"] = steps
     if errors:
         s["first_errors"] = errors[:3]
     return s
@@ -141,6 +153,14 @@ def print_summary(s, title):
     for k in ("ttft_ms", "tpot_ms", "itl_ms", "e2e_ms"):
         m = s[k]
         print(f"| {k[:-3].upper()} | {m['mean']:.1f} | {m['p50']:.1f} | {m['p90']:.1f} | {m['p99']:.1f} |")
+    st = s.get("server_steps")
+    if st:
+        print(f"server: {st.get('steps', 0):.0f} steps ({st.get('mixed_steps', 0):.0f} mixed), "
+              f"decode-only step p50/p99/max {st.get('decode_step_ms_p50', 0):.1f}/"
+              f"{st.get('decode_step_ms_p99', 0):.1f}/{st.get('decode_step_ms_max', 0):.1f} ms, "
+              f"steps with prefill p50/p99/max {st.get('with_prefill_step_ms_p50', 0):.1f}/"
+              f"{st.get('with_prefill_step_ms_p99', 0):.1f}/{st.get('with_prefill_step_ms_max', 0):.1f} ms, "
+              f"preemptions {st.get('preemptions', 0):.0f}")
     if s.get("first_errors"):
         print("errors:", s["first_errors"])
 
@@ -149,13 +169,15 @@ def start_server(args, extra):
     import httpx
     port = args.port
     cmd = [sys.executable, "-m", "nanoinfer", "serve", "--model", args.model, "--port", str(port)] + extra
-    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            encoding="utf-8", errors="replace")
+    # server output goes to a file: an unread pipe would eventually fill up and block the server
+    log = tempfile.NamedTemporaryFile("w+", suffix="-nanoinfer-server.log", delete=False, encoding="utf-8")
+    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
     url = f"http://127.0.0.1:{port}"
     t0 = time.time()
     while time.time() - t0 < 600:
         if proc.poll() is not None:
-            raise RuntimeError("server exited:\n" + proc.stdout.read()[-3000:])
+            log.seek(0)
+            raise RuntimeError("server exited:\n" + log.read()[-3000:])
         try:
             if httpx.get(url + "/health", timeout=1).status_code == 200:
                 return proc, url
@@ -186,8 +208,8 @@ def main():
 
     runs = {}
     if args.url:
-        results, duration = asyncio.run(run_load(args, args.url))
-        runs["server"] = summarize(results, duration)
+        results, duration, steps = asyncio.run(run_load(args, args.url))
+        runs["server"] = summarize(results, duration, steps)
         print_summary(runs["server"], args.url)
     else:
         if not args.model:
@@ -199,7 +221,7 @@ def main():
                 flags = list(extra)
             proc, url = start_server(args, flags)
             try:
-                results, duration = asyncio.run(run_load(args, url))
+                results, duration, steps = asyncio.run(run_load(args, url))
             finally:
                 proc.terminate()
                 try:
@@ -207,7 +229,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     proc.kill()
             name = cfg
-            runs[name] = summarize(results, duration)
+            runs[name] = summarize(results, duration, steps)
             print_summary(runs[name], name)
     if args.out:
         workload = {k: v for k, v in vars(args).items() if k not in ("url", "configs", "out")}

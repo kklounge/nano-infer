@@ -10,6 +10,7 @@ One engine step =
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from nanoinfer.config import EngineConfig, ModelConfig
@@ -100,6 +101,8 @@ class LLM:
         self.scheduler = Scheduler(self.config, self.runner.num_blocks, self.model_config.eos_token_ids)
         self._seqs: dict[int, Sequence] = {}
         self.stats = EngineStats()
+        # durations (ms) of the most recent steps, split by kind, for latency percentiles in metrics()
+        self.recent_step_ms = {"decode": deque(maxlen=4096), "with_prefill": deque(maxlen=4096)}
 
     @staticmethod
     def _load_tokenizer(path: str):
@@ -216,7 +219,9 @@ class LLM:
                 s.finish_time = now
                 st.requests_finished += 1
             outputs.append(StepOutput(s.seq_id, tok, s.is_finished, s.finish_reason, text, lp, s.stop_reason))
-        st.step_seconds += time.perf_counter() - t0
+        dt = time.perf_counter() - t0
+        st.step_seconds += dt
+        self.recent_step_ms["with_prefill" if out.num_prefill else "decode"].append(dt * 1000)
         return outputs
 
     def _detokenize(self, s: Sequence) -> str:
@@ -313,4 +318,15 @@ class LLM:
             "prefix_cache_hit_rate": (self.scheduler.num_prefix_hit_tokens / self.scheduler.num_admitted_tokens
                                       if self.scheduler.num_admitted_tokens else 0.0),
             **{k: v for k, v in vars(st).items()},
+            **_step_percentiles(self.recent_step_ms),
         }
+
+
+def _step_percentiles(recent: dict) -> dict:
+    out = {}
+    for kind, values in recent.items():
+        v = sorted(values)
+        for name, q in (("p50", 0.5), ("p99", 0.99)):
+            out[f"{kind}_step_ms_{name}"] = v[min(len(v) - 1, int(q * len(v)))] if v else 0.0
+        out[f"{kind}_step_ms_max"] = v[-1] if v else 0.0
+    return out

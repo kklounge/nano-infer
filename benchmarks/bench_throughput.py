@@ -70,8 +70,10 @@ def run_nano(args):
     res = {"engine": "nano-infer", "device": str(llm.device), "dtype": str(llm.dtype).replace("torch.", ""),
            **engine_info(llm), "static": [], "mixed": None, "prefix": None}
     print(f"[nano] {engine_info(llm)}", flush=True)
-    # warm-up (first calls allocate memory / pick kernels)
-    llm.generate(make_prompts(2, 32, 99), SamplingParams(temperature=0, max_tokens=8, ignore_eos=True))
+    # warm-up with the shapes that will be measured (first calls compile kernels, pick GEMM
+    # algorithms, grow the allocator); different seeds, so the prefix cache cannot help later
+    for b in args.batch_sizes:
+        llm.generate(make_prompts(b, args.input_len, 99 + b), SamplingParams(temperature=0, max_tokens=8, ignore_eos=True))
 
     if "static" in args.scenarios:
         for b in args.batch_sizes:
@@ -157,7 +159,8 @@ def run_hf(args):
                                   min_new_tokens=max_new, do_sample=False, repetition_penalty=1.0,
                                   temperature=None, top_p=None, top_k=None, pad_token_id=0)
 
-    gen(make_prompts(2, 32, 99), 8)   # warm-up
+    for b in args.batch_sizes:        # warm-up with the measured shapes (same as for nano-infer)
+        gen(make_prompts(b, args.input_len, 99 + b), 8)
     if "static" in args.scenarios:
         for b in args.batch_sizes:
             times, ttfts = [], []

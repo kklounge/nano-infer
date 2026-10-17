@@ -108,6 +108,9 @@ def test_health_and_metrics(client):
     values = dict(line.split(" ") for line in text.strip().splitlines())
     assert float(values["nanoinfer_requests_finished"]) >= 1
     assert "nanoinfer_kv_cache_usage" in values and "nanoinfer_num_requests_running" in values
+    # step latency percentiles: the request above ran one step with prefill and two decode steps
+    assert float(values["nanoinfer_with_prefill_step_ms_p50"]) > 0
+    assert float(values["nanoinfer_decode_step_ms_max"]) >= float(values["nanoinfer_decode_step_ms_p50"]) > 0
 
 
 def test_n_samples_and_seed(client):
