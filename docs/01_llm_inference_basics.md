@@ -33,7 +33,7 @@ Qwen2.5 的词表有 151,936 个 token。一个常见英文单词通常是 1 个
 
 ## 4. 从分数里挑一个：采样（Sampling）
 
-拿到 logits 后，怎么选出下一个 token？本项目 `nanoinfer/engine/sampler.py` 实现了四种方法：
+拿到 logits 后，怎么选出下一个 token？最基本的四种方法（`nanoinfer/engine/sampler.py`）：
 
 | 方法 | 英文 | 做法 | 效果 |
 |---|---|---|---|
@@ -41,6 +41,9 @@ Qwen2.5 的词表有 151,936 个 token。一个常见英文单词通常是 1 个
 | 温度 | temperature | 分数除以 T 再变成概率；T<1 更保守，T>1 更放飞 | 控制"创造力" |
 | Top-k | top-k | 只在分数前 k 名里抽 | 防止抽到离谱的词 |
 | Top-p | top-p / nucleus | 只在"累计概率刚好达到 p"的最小集合里抽 | 候选数量自动伸缩 |
+| Min-p | min-p | 去掉概率小于"最高概率 × p"的候选 | 比 top-p 更适应"有把握/没把握"的情况 |
+
+此外还支持：**重复惩罚**（repetition / presence / frequency penalty，压低已经出现过的 token 的分数，防止车轱辘话）、`min_tokens`（至少写够 N 个 token 才允许结束）、**stop 字符串**（生成的文字里一出现就停）、每个请求自己的 `seed`（同样的种子 → 同样的输出）、`logprobs`（返回每个 token 的对数概率）、`n`（一个问题生成 n 个不同的回答）。实现细节见 [05 篇](05_model_and_attention.md) 第 8 节。
 
 ## 5. 模型里面长什么样（只讲直觉）
 
