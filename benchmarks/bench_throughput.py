@@ -245,7 +245,7 @@ def main():
     device = results["engines"].get("nano", results["engines"].get("hf", {})).get("device", "run")
     suffix = f"-{args.threads}threads" if args.threads and device == "cpu" else ""
     out = args.out or os.path.join(ROOT, "benchmarks", "results", f"{device}{suffix}.json")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
     print_tables(results)
