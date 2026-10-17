@@ -107,8 +107,34 @@ class ModelRunner:
             n = min(int(cfg.cpu_kvcache_gb * 1024 ** 3) // self.block_bytes(), max_useful)
         if n * self.block_size < cfg.max_model_len:
             raise ValueError(f"KV cache of {n} blocks x {self.block_size} tokens cannot hold one sequence of "
-                             f"max_model_len={cfg.max_model_len}; give it more memory or lower max_model_len")
+                             f"max_model_len={cfg.max_model_len}.\n" + self._memory_report())
         return n
+
+    def _memory_report(self) -> str:
+        """What the sizing above actually measured, and what to do about it. Without this the caller
+        only learns that the cache came out too small, and the obvious remedies (lower
+        gpu_memory_utilization, lower max_num_seqs) are the wrong way round or beside the point."""
+        cfg = self.config
+        if self.device.type != "cuda":
+            return (f"On CPU the cache is cpu_kvcache_gb={cfg.cpu_kvcache_gb} GiB and one block holds "
+                    f"{self.block_bytes() / 1024 ** 2:.2f} MiB; raise cpu_kvcache_gb or lower max_model_len.")
+        gib = 1024 ** 3
+        free, total = torch.cuda.mem_get_info()
+        mine = torch.cuda.memory_allocated()
+        others = total - free - mine
+        need = math.ceil(cfg.max_model_len / self.block_size) * self.block_bytes()
+        lines = [
+            f"  GPU total {total / gib:.2f} GiB, model weights {mine / gib:.2f} GiB, "
+            f"other processes {others / gib:.2f} GiB, free {free / gib:.2f} GiB",
+            f"  gpu_memory_utilization={cfg.gpu_memory_utilization} caps everything the engine may use at "
+            f"{total * cfg.gpu_memory_utilization / gib:.2f} GiB,",
+            f"  and one sequence of {cfg.max_model_len} tokens needs {need / gib:.2f} GiB of KV cache "
+            f"(+ activations for {cfg.max_num_batched_tokens} prefill tokens).",
+            "Try, in this order: close whatever else is using the GPU; raise --gpu-memory-utilization "
+            "(it is a fraction of TOTAL memory, so other processes eat into it); lower --max-model-len; "
+            "use a smaller model.",
+        ]
+        return "\n".join(lines)
 
     @torch.inference_mode()
     def _profile_gpu_blocks(self) -> int:

@@ -173,3 +173,88 @@ def test_stop_strings_cut_text(real_model):
         pieces += [o.text for o in llm.step() if o.request_id == rid]
     out = llm.get_output(rid)
     assert "".join(pieces) == out.text == full.text[:full.text.index(", 5")]
+
+
+# ----------------------------------------------------------------------------- candidate window
+# The engine does steps 4-7 inside a narrow "candidate window" instead of over the whole vocabulary
+# (sampler._candidate_window). These tests pin that down against a row-by-row reference.
+import pytest                                                          # noqa: E402
+from nanoinfer.engine.sampler import _candidate_window, filter_logits   # noqa: E402
+
+
+def _reference_filter(logits, top_ks, top_ps, min_ps):
+    """The documented pipeline (top-k, then top-p, then min-p), written out one row at a time.
+    Each filter is off at its neutral value, exactly as SamplingParams documents: top_k <= 0,
+    top_p == 1.0, min_p == 0. (Running top-p at p == 1.0 anyway would drop the last token now and
+    then, because a float32 cumsum of the whole vocabulary reaches 1.0 before the end.)"""
+    vocab = logits.shape[-1]
+    out = torch.full_like(logits, float("-inf"))
+    for r in range(logits.shape[0]):
+        row = logits[r]
+        order = torch.argsort(row, descending=True)
+        k = vocab if top_ks[r] <= 0 else min(int(top_ks[r]), vocab)
+        cand = order[:k]                                            # top-k
+        if float(top_ps[r]) < 1.0:                                  # top-p
+            probs = torch.softmax(row[cand], dim=-1)
+            mass_before = probs.cumsum(0) - probs
+            cand = cand[mass_before <= float(top_ps[r])]
+        if float(min_ps[r]) > 0:                                    # min-p
+            probs = torch.softmax(row[cand], dim=-1)
+            cand = cand[probs >= float(min_ps[r]) * float(probs.max())]
+        out[r, cand] = row[cand]
+    return out
+
+
+@pytest.mark.parametrize("vocab", [37, 3000])
+@pytest.mark.parametrize("top_k", [0, 1, 8, 10**6, "mixed"])
+@pytest.mark.parametrize("top_p", [1.0, 0.7])
+@pytest.mark.parametrize("min_p", [0.0, 0.1])
+def test_candidate_window_matches_row_by_row_reference(vocab, top_k, top_p, min_p):
+    b = 6
+    logits = torch.randn(b, vocab) * 4                       # random floats: no ties to break
+    ks = [0 if i % 2 else 8 for i in range(b)] if top_k == "mixed" else [top_k] * b
+    top_ks = torch.tensor(ks, dtype=torch.long) if any(ks) else None
+    top_ps = torch.full((b,), top_p) if top_p < 1.0 else None
+    min_ps = torch.full((b,), min_p) if min_p > 0 else None
+    k_max = max((vocab if k <= 0 else k) for k in ks)
+    got = filter_logits(logits, top_ks, top_ps, min_ps, k_max)
+    want = _reference_filter(logits, ks, [top_p] * b, [min_p] * b)
+    # the kept tokens, and the distribution they imply, must be the same
+    assert torch.equal(got > float("-inf"), want > float("-inf"))
+    torch.testing.assert_close(torch.softmax(got, -1), torch.softmax(want, -1), atol=1e-6, rtol=1e-6)
+
+
+def test_window_is_narrow_when_top_k_bounds_it():
+    """The whole point: no vocabulary-wide sort when every row caps its candidates."""
+    logits = torch.randn(4, 50_000)
+    _, idx = _candidate_window(logits, torch.full((4,), 20, dtype=torch.long), torch.full((4,), 0.9), None, 20)
+    assert idx.shape == (4, 20)
+    # one row with top-k off needs the whole row, and says so
+    ks = torch.tensor([20, 0, 20, 20])
+    _, idx = _candidate_window(logits, ks, torch.full((4,), 0.9), None, 50_000)
+    assert idx.shape == (4, 50_000)
+
+
+def test_greedy_row_does_not_disturb_the_others():
+    """A greedy row must not change what a sampling row draws (it used to widen the window)."""
+    sampler = Sampler(torch.device("cpu"), 500, eos_token_ids=[])
+    logits = torch.randn(1, 500) * 3
+    sp = dict(temperature=0.8, top_p=0.8, top_k=20, seed=11)
+    alone = sampler(logits, [_seq([1], **sp)])[0][0]
+    with_greedy = sampler(logits.repeat(3, 1),
+                          [_seq([1], temperature=0), _seq([1], **sp), _seq([1], temperature=0)])[0]
+    assert with_greedy[1] == alone
+    assert with_greedy[0] == with_greedy[2] == int(logits[0].argmax())
+
+
+def test_penalties_without_counts_match_the_full_path():
+    """need_counts=False is the repetition-penalty-only shortcut: it must agree with the full form."""
+    logits = torch.randn(3, 200) * 2
+    ids = torch.randint(0, 60, (3, 12))
+    ids[:, 9:] = 200                                         # tail padding (= vocab size)
+    mask = (ids < 200) & (torch.arange(12)[None, :] >= 4)
+    rep, zero = torch.full((3,), 1.3), torch.zeros(3)
+    full = apply_penalties(logits.clone(), ids, mask, rep, zero, zero, need_counts=True)
+    quick = apply_penalties(logits.clone(), ids, mask, rep, zero, zero, need_counts=False)
+    torch.testing.assert_close(full, quick)
+    assert not torch.equal(full, logits)                     # the penalty did something

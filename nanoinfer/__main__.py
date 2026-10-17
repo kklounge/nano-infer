@@ -34,6 +34,20 @@ def _sp(args, **kw):
                           seed=args.sample_seed, **kw)
 
 
+def _use_utf8():
+    """Write UTF-8 whatever the console's code page is.
+
+    A Windows console reports a legacy code page (GBK on a Chinese system, cp1252 on a Western one)
+    and so does a redirected stdout. Model output is arbitrary text, so a single emoji or rare CJK
+    character would raise UnicodeEncodeError in the middle of a reply and kill the whole session.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass            # not a reconfigurable text stream (e.g. already wrapped)
+
+
 def _load(args):
     from nanoinfer import LLM
     from nanoinfer.cli_args import describe, engine_kwargs
@@ -41,6 +55,28 @@ def _load(args):
     llm = LLM(args.model, **engine_kwargs(args))
     print(f"[nano-infer] {describe(llm)} | loaded in {time.perf_counter() - t0:.1f}s", file=sys.stderr)
     return llm
+
+
+def _fit_history(llm, history, args):
+    """Template the chat history, dropping the oldest messages until the prompt leaves room for the
+    reply inside max_model_len. Returns (token ids, number of messages dropped), or (None, n) when
+    even the newest message alone does not fit. A system message is never dropped.
+
+    Without this a long enough conversation walks into the engine's "prompt has N tokens;
+    max_model_len is M" error and ends the chat session.
+    """
+    keep = 1 if args.system else 0
+    reserve = min(args.max_tokens, llm.config.max_model_len * 3 // 4)   # room to answer in
+    budget = llm.config.max_model_len - reserve
+    dropped = 0
+    while True:
+        ids = llm.apply_chat_template(history)
+        if len(ids) <= budget:
+            return ids, dropped
+        if len(history) <= keep + 1:        # only the system message and the new question are left
+            return None, dropped
+        del history[keep]                   # oldest message that is not the system one
+        dropped += 1
 
 
 def cmd_chat(args):
@@ -61,15 +97,31 @@ def cmd_chat(args):
         if not user:
             continue
         history.append({"role": "user", "content": user})
-        rid = llm.add_request(llm.apply_chat_template(history), _sp(args, detokenize=True))
+        prompt, dropped = _fit_history(llm, history, args)
+        if prompt is None:
+            history.pop()
+            print(f"bot> [that message is too long for a {llm.config.max_model_len}-token context "
+                  f"window; send a shorter one or restart with a larger --max-model-len]\n")
+            continue
+        if dropped:
+            print(f"   [dropped the {dropped} oldest message(s) to stay within "
+                  f"{llm.config.max_model_len} tokens]", file=sys.stderr)
+        rid = llm.add_request(prompt, _sp(args, detokenize=True))
         print("bot> ", end="", flush=True)
         t0 = time.perf_counter()
         done = False
-        while not done:
-            for out in llm.step():
-                if out.request_id == rid:
-                    print(out.text, end="", flush=True)
-                    done = out.finished
+        try:
+            while not done:
+                for out in llm.step():
+                    if out.request_id == rid:
+                        print(out.text, end="", flush=True)
+                        done = out.finished
+        except KeyboardInterrupt:           # Ctrl+C cancels this reply, not the whole session
+            llm.abort(rid)
+            llm.release(rid)
+            history.pop()
+            print("\n   [interrupted]\n")
+            continue
         res = llm.get_output(rid)
         dt = time.perf_counter() - t0
         print(f"\n   [{len(res.token_ids)} tokens, {len(res.token_ids) / dt:.1f} tok/s, first token "
@@ -107,6 +159,7 @@ def cmd_info(args):
 
 def main(argv=None):
     from nanoinfer.cli_args import add_engine_args
+    _use_utf8()
     ap = argparse.ArgumentParser(prog="nano-infer", description="nano-infer: a small, fast LLM inference engine")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("serve", help="OpenAI-compatible HTTP server", add_help=False)

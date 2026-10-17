@@ -158,3 +158,15 @@ decode 每一步要启动几百个 GPU kernel（24 层 × 每层十几个），�
 2. 温度，然后 top-k、top-p、min-p 过滤；
 3. 抽样用"指数竞赛"（exponential race）：`argmax(p / E)`，E 是独立的指数分布随机数，和按概率抽样数学上等价，但不需要 `torch.multinomial` 的同步；设置了 `seed` 的请求用自己的 `torch.Generator`，结果可复现；
 4. 需要时返回 logprobs（所选 token 和前 k 个候选）。
+
+### 候选窗口（candidate window）
+
+第 2、3 步不在整个词表上做，而是在一个"候选窗口"里做（`_candidate_window`）：词表有 15 万多列，每步都整列扫一遍，采样会比模型本身的前向还慢。
+
+- 只要 batch 里**每一行**都用 top-k 限制了候选数，那么每行最多只有 W = max(top_k) 个 token 可能被选中，用 `topk(W)` 就够了（`topk` 返回的结果本来就是降序的），不需要整列排序；有一行关掉了 top-k，才退回整列 `sort`。
+- W 由 Python 侧的 `SamplingParams` 算出（关掉 top-k 的行按词表大小算），所以选 W 不需要 GPU→CPU 同步。
+- 贪心（temperature=0）的行最后会被 argmax 的结果覆盖，所以给它们 top_k=1、关掉其它过滤器：否则 batch 里一个贪心请求（`top_k` 默认 0）就会把窗口撑到整个词表，把其它请求一起拖进整列排序。
+- 温度除法放在取窗口之后：除以一个正温度不改变顺序，所以窗口照样是对的，但少写一遍 [B, V]。
+- 惩罚同理，在 [R, L] 的历史上做 gather/scatter（几千个元素），而不是开 [R, V] 的词表缓冲区（batch 64 时约一千万个元素）；只有 presence / frequency penalty 需要计数，才开那一个词表大小的缓冲区。
+
+实测（RTX 5070，Qwen2.5-0.5B，batch 64，每步）：按 Qwen 推荐的 `top_p=0.8, top_k=20` 采样，21.2 ms → 8.2 ms；再加 `repetition_penalty=1.05`，22.6 ms → 11.3 ms；63 个贪心请求 + 1 个采样请求，20.3 ms → 9.7 ms。单路（batch 1）没有明显变化——那时瓶颈是读权重，不是采样。`top_k=0` 配 `top_p<1` 仍然要整列排序，这是没办法省的。
