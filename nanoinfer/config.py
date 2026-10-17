@@ -96,6 +96,7 @@ class EngineConfig:
     # "sdpa"  : gather pages into a contiguous tensor + torch's fused attention (works everywhere)
     # "naive" : plain matmul + softmax, the textbook formula (for learning)
     attn_backend: str = "auto"
+    use_fused_ops: bool | None = None       # None -> fused Triton RMSNorm/RoPE/SiLU kernels with the triton backend
     use_cuda_graph: bool | None = None      # None -> on for CUDA (decode steps replay captured graphs)
     enforce_eager: bool = False             # True -> never use CUDA graphs
     max_cuda_graph_batch: int = 128         # largest decode batch that is captured

@@ -128,9 +128,11 @@ def _attend(q, k, v, scale, mask, is_causal, backend):
     return torch.matmul(probs, v)
 
 
-def paged_attention(q, k, v, k_cache, v_cache, meta: AttentionMetadata, scale: float) -> torch.Tensor:
-    """q: [T, H, D]; k, v: [T, KVH, D] for the new tokens. Returns [T, H, D]."""
-    if k_cache is not None:
+def paged_attention(q, k, v, k_cache, v_cache, meta: AttentionMetadata, scale: float,
+                    store: bool = True) -> torch.Tensor:
+    """q: [T, H, D]; k, v: [T, KVH, D] for the new tokens. Returns [T, H, D].
+    store=False: the caller already wrote k/v into the cache (fused RoPE + store kernel)."""
+    if k_cache is not None and store:
         store_kv(k, v, k_cache, v_cache, meta.slot_mapping)
     nd = meta.num_decode
     if not meta.num_prefill_seqs:

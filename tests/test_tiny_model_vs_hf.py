@@ -32,8 +32,14 @@ def test_weights_loaded_exactly(tiny):
     path, hf = tiny
     llm = LLM(str(path), dtype="float32", device="cpu", max_model_len=256)
     ours = dict(llm.runner.model.named_parameters(remove_duplicate=False))
+    from nanoinfer.model.loader import map_name
     for name, p in hf.named_parameters(remove_duplicate=False):
-        assert torch.equal(ours[name], p), name
+        packed = map_name(name, llm.model_config)       # q/k/v and gate/up live in merged matrices
+        if packed is None:
+            assert torch.equal(ours[name], p), name
+        else:
+            target, start, n = packed
+            assert torch.equal(ours[target][start:start + n], p), name
 
 
 @pytest.mark.parametrize("backend", ["sdpa", "naive"])

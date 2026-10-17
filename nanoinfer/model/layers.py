@@ -19,8 +19,20 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
+        self.use_fused_ops = False
+
+    def add_and_norm(self, x: torch.Tensor, residual: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """residual = x + residual; return (RMSNorm(residual), residual). One kernel when fused."""
+        if self.use_fused_ops:
+            from nanoinfer.model.triton_ops import fused_add_rmsnorm
+            return fused_add_rmsnorm(x, residual, self.weight, self.eps)
+        residual = residual + x
+        return self.forward(residual), residual
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.use_fused_ops:
+            from nanoinfer.model.triton_ops import rmsnorm
+            return rmsnorm(x, self.weight, self.eps)
         in_dtype = x.dtype
         x32 = x.to(torch.float32)
         variance = x32.pow(2).mean(-1, keepdim=True)
@@ -57,28 +69,19 @@ class RotaryEmbedding(nn.Module):
         # computed in float32, then rounded to the model dtype (same as the reference implementation)
         return emb.cos().to(dtype), emb.sin().to(dtype)
 
+    def tables(self, device: torch.device, dtype: torch.dtype):
+        """Full (cos, sin) tables, each [max_positions, D]."""
+        key = (device, dtype)
+        if key not in self._tables:
+            self._tables[key] = self._build(device, dtype)
+        return self._tables[key]
+
     def forward(self, positions: torch.Tensor, dtype: torch.dtype):
         """positions [T] -> (cos, sin), each [T, 1, D] (the 1 broadcasts over heads)."""
-        key = (positions.device, dtype)
-        if key not in self._tables:
-            self._tables[key] = self._build(positions.device, dtype)
-        cos, sin = self._tables[key]
+        cos, sin = self.tables(positions.device, dtype)
         return cos[positions].unsqueeze(1), sin[positions].unsqueeze(1)
 
 
 def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """x: [T, heads, D]. Rotates every (x_i, x_{i+D/2}) pair by the position's angle."""
     return (x * cos) + (rotate_half(x) * sin)
-
-
-class SwiGLUMLP(nn.Module):
-    """Feed-forward block: down( silu(gate(x)) * up(x) )."""
-
-    def __init__(self, hidden_size: int, intermediate_size: int):
-        super().__init__()
-        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
-        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))

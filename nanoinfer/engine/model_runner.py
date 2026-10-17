@@ -48,6 +48,12 @@ class ModelRunner:
         self.pin = device.type == "cuda"
         torch.manual_seed(config.seed)
         self.model = load_model(config.model, device, dtype, max_positions=config.max_model_len, cfg=model_config)
+        self.use_fused_ops = config.use_fused_ops
+        if self.use_fused_ops is None:
+            self.use_fused_ops = self.attn_backend == "triton"
+        if self.use_fused_ops and not triton_usable(device):
+            raise ValueError("use_fused_ops=True needs Triton on an NVIDIA GPU")
+        self.model.set_fused_ops(self.use_fused_ops)
 
         self.num_blocks = self._decide_num_blocks()
         mc = model_config
@@ -70,7 +76,7 @@ class ModelRunner:
             use_graph = device.type == "cuda"
         if config.enforce_eager:
             use_graph = False
-        if self.attn_backend == "triton":
+        if self.attn_backend == "triton" or self.use_fused_ops:
             self._warmup()
         if use_graph:
             if device.type != "cuda":
