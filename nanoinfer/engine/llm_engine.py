@@ -75,6 +75,7 @@ class EngineStats:
     decode_tokens: int = 0
     preemptions: int = 0
     requests_finished: int = 0
+    requests_aborted: int = 0
     step_seconds: float = 0.0            # wall time spent inside step()
 
 
@@ -152,6 +153,7 @@ class LLM:
         seq = self.scheduler.abort(request_id)
         if seq is not None:
             seq.finish_time = time.perf_counter()
+            self.stats.requests_aborted += 1
 
     def release(self, request_id: int):
         """Forget a finished request (generate() does this for you via get_output())."""
