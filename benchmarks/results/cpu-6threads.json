@@ -1,0 +1,147 @@
+{
+  "hardware": {
+    "platform": "Linux-6.12.94+-x86_64-with-glibc2.41",
+    "python": "3.13.5",
+    "torch": "2.14.1+cpu",
+    "cpu_count": 8,
+    "torch_threads": 6,
+    "cpu": "Intel(R) Xeon(R) Processor"
+  },
+  "config": {
+    "model": "/workspace/hf_models/Qwen2.5-0.5B-Instruct",
+    "device": "auto",
+    "dtype": "auto",
+    "batch_sizes": [
+      1,
+      4,
+      16
+    ],
+    "input_len": 128,
+    "output_len": 128,
+    "repeats": 3,
+    "mixed_hf_batch": 16,
+    "scenarios": [
+      "static",
+      "mixed",
+      "prefix"
+    ],
+    "engines": [
+      "hf",
+      "nano"
+    ],
+    "cuda_graph": false,
+    "no_prefix": false,
+    "threads": 6,
+    "out": null
+  },
+  "engines": {
+    "hf": {
+      "engine": "hf-generate",
+      "device": "cpu",
+      "dtype": "bfloat16",
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 5.4755703359996915,
+          "tok_per_s": 23.376560275091535,
+          "ttft_s": 0.09664587599945662,
+          "all_seconds": [
+            5.210521883000183,
+            5.487224620999768,
+            5.4755703359996915
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 6.6055262620002395,
+          "tok_per_s": 77.51085677236559,
+          "ttft_s": 0.2727179539997451,
+          "all_seconds": [
+            6.739051825999923,
+            6.6055262620002395,
+            6.2631001649997415
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 8.129925847000777,
+          "tok_per_s": 251.9088167028646,
+          "ttft_s": 0.8974750200004564,
+          "all_seconds": [
+            8.159728783999526,
+            8.129925847000777,
+            8.01835142300024
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 30.249451427999702,
+        "tok_per_s": 115.63846069493206,
+        "mean_latency_s": 22.701044035499763,
+        "hf_batch_size": 16
+      }
+    },
+    "nano": {
+      "engine": "nano-infer",
+      "device": "cpu",
+      "dtype": "bfloat16",
+      "kv_blocks": 2730,
+      "static": [
+        {
+          "batch": 1,
+          "seconds": 4.7338670150002145,
+          "tok_per_s": 27.039204860298383,
+          "ttft_s": 0.09708189200046036,
+          "all_seconds": [
+            5.096114195000155,
+            4.7338670150002145,
+            4.690013628000088
+          ]
+        },
+        {
+          "batch": 4,
+          "seconds": 6.007380824999927,
+          "tok_per_s": 85.22849057101456,
+          "ttft_s": 0.17491650049987584,
+          "all_seconds": [
+            6.007380824999927,
+            5.918417375999525,
+            7.065314182000293
+          ]
+        },
+        {
+          "batch": 16,
+          "seconds": 7.642185988000165,
+          "tok_per_s": 267.9861499335124,
+          "ttft_s": 0.889945291437698,
+          "all_seconds": [
+            8.281182177000119,
+            7.642185988000165,
+            7.102255896000315
+          ]
+        }
+      ],
+      "mixed": {
+        "requests": 32,
+        "useful_tokens": 3498,
+        "seconds": 15.008315193999806,
+        "tok_per_s": 233.0707980732221,
+        "mean_latency_s": 8.100590096843774
+      },
+      "prefix": {
+        "without_prefix_cache": {
+          "seconds": 5.949101682000219,
+          "prefill_tokens_computed": 8704,
+          "mean_ttft_s": 2.821885750187505
+        },
+        "with_prefix_cache": {
+          "seconds": 2.139894342999469,
+          "prefill_tokens_computed": 512,
+          "mean_ttft_s": 0.24531346618789485
+        }
+      }
+    }
+  }
+}
